@@ -580,23 +580,36 @@ class IMDBKit:
 
             title_akas = []
 
-            for item in tmdb_data.get(
-                "alternative_titles",
-                {}).get("titles", [])
-                if isinstance(
-                    tmdb_data.get("alternative_titles"),
-                    dict
+            alternative_titles = tmdb_data.get(
+                "alternative_titles"
+            )
+
+            if isinstance(alternative_titles, dict):
+
+                alternative_title_list = (
+                    alternative_titles.get("titles", [])
                 )
-            ]:
-                if isinstance(item, dict):
-                    value = (
-                        item.get("title")
-                        or item.get("name")
-                    )
 
-                    if value:
-                        title_akas.append(value)
+                if isinstance(
+                    alternative_title_list,
+                    list
+                ):
 
+                    for item in alternative_title_list:
+
+                        if not isinstance(
+                            item,
+                            dict
+                        ):
+                            continue
+
+                        value = (
+                            item.get("title")
+                            or item.get("name")
+                        )
+
+                        if value:
+                            title_akas.append(value)
             # ----------------------------------------------------
             # Credits
             # ----------------------------------------------------
