@@ -169,6 +169,8 @@ class IMDBKit:
 
         mapping = {
             "movie": "movie",
+            "feature": "movie",
+            "feature film": "movie",
             "tvseries": "tv series",
             "tv series": "tv series",
             "series": "tv series",
@@ -267,10 +269,11 @@ class IMDBKit:
             imdb_id = self._normalize_imdb_id(
                 item.get("id")
             )
-
-            if not imdb_id:
+            if not imdb_id or not imdb_id.startswith("tt"):
                 continue
 
+            if not imdb_id or not imdb_id.startswith("tt"):
+                continue
             item_title = (
                 item.get("l")
                 or item.get("title")
