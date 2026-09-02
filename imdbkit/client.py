@@ -585,22 +585,13 @@ class IMDBKit:
             )
 
             if isinstance(alternative_titles, dict):
-
                 alternative_title_list = (
                     alternative_titles.get("titles", [])
                 )
 
-                if isinstance(
-                    alternative_title_list,
-                    list
-                ):
-
+                if isinstance(alternative_title_list, list):
                     for item in alternative_title_list:
-
-                        if not isinstance(
-                            item,
-                            dict
-                        ):
+                        if not isinstance(item, dict):
                             continue
 
                         value = (
@@ -610,6 +601,7 @@ class IMDBKit:
 
                         if value:
                             title_akas.append(value)
+                            
             # ----------------------------------------------------
             # Credits
             # ----------------------------------------------------
