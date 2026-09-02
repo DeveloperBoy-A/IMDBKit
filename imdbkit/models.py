@@ -162,9 +162,6 @@ class Movie:
     def poster_url(self) -> Optional[str]:
         return self.cover_url
 
-    @property
-    def localized_title(self) -> Optional[str]:
-        return self.title_localized
 
     def get(self, key: str, default: Any = None) -> Any:
         """
