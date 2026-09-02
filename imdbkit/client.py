@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import urllib.parse
@@ -6,6 +7,9 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 from .models import Movie, SearchResult, SeriesInfo, Title
+
+
+logger = logging.getLogger(__name__)
 
 
 class IMDBKit:
@@ -37,6 +41,16 @@ class IMDBKit:
         )
 
         self.timeout = timeout
+
+        if self.tmdb_api_key:
+            logger.info(
+                "IMDBKit: TMDB API key loaded successfully."
+            )
+        else:
+            logger.warning(
+                "IMDBKit: TMDB API key not configured. "
+                "Using IMDb fallback only."
+            )
 
     # ============================================================
     # HTTP
@@ -81,7 +95,53 @@ class IMDBKit:
 
             return json.loads(data)
 
-        except Exception:
+        except urllib.error.HTTPError as exc:
+            logger.error(
+                "IMDBKit HTTP error %s for %s",
+                exc.code,
+                url.split("?")[0],
+            )
+
+            try:
+                error_body = exc.read().decode("utf-8")
+                logger.error(
+                    "IMDBKit HTTP response: %s",
+                    error_body[:500],
+                )
+            except Exception:
+                pass
+
+            return None
+
+        except urllib.error.URLError as exc:
+            logger.error(
+                "IMDBKit network error for %s: %s",
+                url.split("?")[0],
+                exc.reason,
+            )
+            return None
+
+        except TimeoutError:
+            logger.error(
+                "IMDBKit request timed out: %s",
+                url.split("?")[0],
+            )
+            return None
+
+        except json.JSONDecodeError as exc:
+            logger.error(
+                "IMDBKit invalid JSON response from %s: %s",
+                url.split("?")[0],
+                exc,
+            )
+            return None
+
+        except Exception as exc:
+            logger.exception(
+                "IMDBKit unexpected request error for %s: %s",
+                url.split("?")[0],
+                exc,
+            )
             return None
 
     # ============================================================
@@ -89,7 +149,9 @@ class IMDBKit:
     # ============================================================
 
     @staticmethod
-    def _normalize_imdb_id(imdb_id: Any) -> Optional[str]:
+    def _normalize_imdb_id(
+        imdb_id: Any,
+    ) -> Optional[str]:
         if imdb_id is None:
             return None
 
@@ -104,7 +166,10 @@ class IMDBKit:
         if value.isdigit():
             return f"tt{value}"
 
-        match = re.search(r"(tt\d+)", value)
+        match = re.search(
+            r"(tt\d+)",
+            value,
+        )
 
         if match:
             return match.group(1)
@@ -112,7 +177,9 @@ class IMDBKit:
         return value
 
     @staticmethod
-    def _clean_text(value: Any) -> Optional[str]:
+    def _clean_text(
+        value: Any,
+    ) -> Optional[str]:
         if value is None:
             return None
 
@@ -124,7 +191,9 @@ class IMDBKit:
         return str(value).strip() or None
 
     @staticmethod
-    def _safe_int(value: Any) -> Optional[int]:
+    def _safe_int(
+        value: Any,
+    ) -> Optional[int]:
         try:
             if value is None:
                 return None
@@ -135,7 +204,9 @@ class IMDBKit:
             return None
 
     @staticmethod
-    def _safe_float(value: Any) -> Optional[float]:
+    def _safe_float(
+        value: Any,
+    ) -> Optional[float]:
         try:
             if value is None:
                 return None
@@ -146,11 +217,16 @@ class IMDBKit:
             return None
 
     @staticmethod
-    def _year_from_date(value: Any) -> Optional[int]:
+    def _year_from_date(
+        value: Any,
+    ) -> Optional[int]:
         if not value:
             return None
 
-        match = re.search(r"\b(19|20)\d{2}\b", str(value))
+        match = re.search(
+            r"\b(19|20)\d{2}\b",
+            str(value),
+        )
 
         if match:
             try:
@@ -161,7 +237,9 @@ class IMDBKit:
         return None
 
     @staticmethod
-    def _normalize_kind(kind: Any) -> Optional[str]:
+    def _normalize_kind(
+        kind: Any,
+    ) -> Optional[str]:
         if not kind:
             return None
 
@@ -184,10 +262,15 @@ class IMDBKit:
             "tvepisode": "tvEpisode",
         }
 
-        return mapping.get(value, value)
+        return mapping.get(
+            value,
+            value,
+        )
 
     @staticmethod
-    def _extract_name(value: Any) -> str:
+    def _extract_name(
+        value: Any,
+    ) -> str:
         if isinstance(value, str):
             return value
 
@@ -203,7 +286,9 @@ class IMDBKit:
         return str(value)
 
     @staticmethod
-    def _extract_names(values: Any) -> List[str]:
+    def _extract_names(
+        values: Any,
+    ) -> List[str]:
         if not values:
             return []
 
@@ -249,31 +334,46 @@ class IMDBKit:
         if not title:
             return SearchResult([])
 
-        encoded = urllib.parse.quote(title, safe="")
+        encoded = urllib.parse.quote(
+            title,
+            safe="",
+        )
 
-        url = f"{self.IMDb_SUGGESTION_URL}{encoded}.json"
+        url = (
+            f"{self.IMDb_SUGGESTION_URL}"
+            f"{encoded}.json"
+        )
 
         data = self._request_json(url)
 
         if not data:
             return SearchResult([])
 
-        raw_results = data.get("d", [])
+        raw_results = data.get(
+            "d",
+            [],
+        )
 
         titles = []
 
         for item in raw_results:
-            if not isinstance(item, dict):
+
+            if not isinstance(
+                item,
+                dict,
+            ):
                 continue
 
             imdb_id = self._normalize_imdb_id(
                 item.get("id")
             )
-            if not imdb_id or not imdb_id.startswith("tt"):
+
+            if (
+                not imdb_id
+                or not imdb_id.startswith("tt")
+            ):
                 continue
 
-            if not imdb_id or not imdb_id.startswith("tt"):
-                continue
             item_title = (
                 item.get("l")
                 or item.get("title")
@@ -292,7 +392,10 @@ class IMDBKit:
 
             image_url = (
                 item.get("i", {}).get("imageUrl")
-                if isinstance(item.get("i"), dict)
+                if isinstance(
+                    item.get("i"),
+                    dict,
+                )
                 else None
             )
 
@@ -339,20 +442,31 @@ class IMDBKit:
         self,
         imdb_id: str,
     ) -> Optional[Title]:
-        imdb_id = self._normalize_imdb_id(imdb_id)
+
+        imdb_id = self._normalize_imdb_id(
+            imdb_id
+        )
 
         if not imdb_id:
             return None
 
         data = self._request_json(
-            f"https://v3.sg.media-imdb.com/suggestion/x/{imdb_id}.json"
+            f"{self.IMDb_SUGGESTION_URL}"
+            f"{imdb_id}.json"
         )
 
         if not data:
             return None
 
-        for item in data.get("d", []):
-            if not isinstance(item, dict):
+        for item in data.get(
+            "d",
+            [],
+        ):
+
+            if not isinstance(
+                item,
+                dict,
+            ):
                 continue
 
             item_id = self._normalize_imdb_id(
@@ -372,8 +486,14 @@ class IMDBKit:
                     item.get("q")
                 ),
                 image_url=(
-                    item.get("i", {}).get("imageUrl")
-                    if isinstance(item.get("i"), dict)
+                    item.get(
+                        "i",
+                        {},
+                    ).get("imageUrl")
+                    if isinstance(
+                        item.get("i"),
+                        dict,
+                    )
                     else None
                 ),
             )
@@ -388,7 +508,12 @@ class IMDBKit:
         self,
         imdb_id: str,
     ) -> Optional[Dict[str, Any]]:
+
         if not self.tmdb_api_key:
+            logger.warning(
+                "IMDBKit: TMDB lookup skipped because "
+                "API key is missing."
+            )
             return None
 
         return self._request_json(
@@ -404,14 +529,21 @@ class IMDBKit:
         media_type: str,
         tmdb_id: Any,
     ) -> Optional[Dict[str, Any]]:
-        if not self.tmdb_api_key or not tmdb_id:
+
+        if not self.tmdb_api_key:
+            return None
+
+        if not tmdb_id:
             return None
 
         return self._request_json(
             f"{self.TMDB_BASE_URL}/{media_type}/{tmdb_id}",
             {
                 "api_key": self.tmdb_api_key,
-                "append_to_response": "credits,external_ids",
+                "append_to_response": (
+                    "credits,external_ids,"
+                    "alternative_titles"
+                ),
             },
         )
 
@@ -494,7 +626,9 @@ class IMDBKit:
             )
 
             year = (
-                self._year_from_date(release_date)
+                self._year_from_date(
+                    release_date
+                )
                 or year
             )
 
@@ -504,21 +638,40 @@ class IMDBKit:
             )
 
             rating = self._safe_float(
-                tmdb_data.get("vote_average")
+                tmdb_data.get(
+                    "vote_average"
+                )
             )
 
             votes = self._safe_int(
-                tmdb_data.get("vote_count")
-            )
-
-            runtime = (
-                tmdb_data.get("runtime")
-                or (
-                    tmdb_data.get("episode_run_time", [None])[0]
-                    if tmdb_data.get("episode_run_time")
-                    else None
+                tmdb_data.get(
+                    "vote_count"
                 )
             )
+
+            # ----------------------------------------------------
+            # Runtime
+            # ----------------------------------------------------
+
+            runtime = tmdb_data.get(
+                "runtime"
+            )
+
+            if not runtime:
+                episode_runtime = (
+                    tmdb_data.get(
+                        "episode_run_time"
+                    )
+                )
+
+                if (
+                    isinstance(
+                        episode_runtime,
+                        list,
+                    )
+                    and episode_runtime
+                ):
+                    runtime = episode_runtime[0]
 
             # ----------------------------------------------------
             # Poster
@@ -542,9 +695,12 @@ class IMDBKit:
                 item.get("name")
                 for item in tmdb_data.get(
                     "production_countries",
-                    []
+                    [],
                 )
-                if isinstance(item, dict)
+                if isinstance(
+                    item,
+                    dict,
+                )
                 and item.get("name")
             ]
 
@@ -553,14 +709,19 @@ class IMDBKit:
             # ----------------------------------------------------
 
             languages = [
-                item.get("english_name")
-                or item.get("name")
-                or item.get("iso_639_1")
+                (
+                    item.get("english_name")
+                    or item.get("name")
+                    or item.get("iso_639_1")
+                )
                 for item in tmdb_data.get(
                     "spoken_languages",
-                    []
+                    [],
                 )
-                if isinstance(item, dict)
+                if isinstance(
+                    item,
+                    dict,
+                )
             ]
 
             # ----------------------------------------------------
@@ -571,9 +732,12 @@ class IMDBKit:
                 item.get("name")
                 for item in tmdb_data.get(
                     "genres",
-                    []
+                    [],
                 )
-                if isinstance(item, dict)
+                if isinstance(
+                    item,
+                    dict,
+                )
                 and item.get("name")
             ]
 
@@ -581,20 +745,33 @@ class IMDBKit:
             # Alternative titles
             # ----------------------------------------------------
 
-            title_akas = []
-
             alternative_titles = tmdb_data.get(
                 "alternative_titles"
             )
 
-            if isinstance(alternative_titles, dict):
+            if isinstance(
+                alternative_titles,
+                dict,
+            ):
+
                 alternative_title_list = (
-                    alternative_titles.get("titles", [])
+                    alternative_titles.get(
+                        "titles",
+                        [],
+                    )
                 )
 
-                if isinstance(alternative_title_list, list):
+                if isinstance(
+                    alternative_title_list,
+                    list,
+                ):
+
                     for item in alternative_title_list:
-                        if not isinstance(item, dict):
+
+                        if not isinstance(
+                            item,
+                            dict,
+                        ):
                             continue
 
                         value = (
@@ -603,52 +780,71 @@ class IMDBKit:
                         )
 
                         if value:
-                            title_akas.append(value)
-                            
+                            title_akas.append(
+                                value
+                            )
+
             # ----------------------------------------------------
             # Credits
             # ----------------------------------------------------
 
             credits = tmdb_data.get(
                 "credits",
-                {}
+                {},
             )
 
-            if isinstance(credits, dict):
+            if isinstance(
+                credits,
+                dict,
+            ):
 
                 for person in credits.get(
                     "cast",
-                    []
+                    [],
                 )[:20]:
 
-                    if not isinstance(person, dict):
+                    if not isinstance(
+                        person,
+                        dict,
+                    ):
                         continue
 
-                    name = person.get("name")
+                    name = person.get(
+                        "name"
+                    )
 
                     if name:
                         cast.append(name)
 
                 for person in credits.get(
                     "crew",
-                    []
+                    [],
                 ):
 
-                    if not isinstance(person, dict):
+                    if not isinstance(
+                        person,
+                        dict,
+                    ):
                         continue
 
-                    name = person.get("name")
+                    name = person.get(
+                        "name"
+                    )
 
                     if not name:
                         continue
 
                     department = (
-                        person.get("department")
+                        person.get(
+                            "department"
+                        )
                         or ""
                     ).lower()
 
                     job = (
-                        person.get("job")
+                        person.get(
+                            "job"
+                        )
                         or ""
                     ).lower()
 
@@ -673,11 +869,17 @@ class IMDBKit:
                     ):
                         producers.append(name)
 
-                    elif department == "sound":
+                    elif (
+                        department == "sound"
+                    ):
                         composers.append(name)
 
-                    elif department == "camera":
-                        cinematographers.append(name)
+                    elif (
+                        department == "camera"
+                    ):
+                        cinematographers.append(
+                            name
+                        )
 
             # ----------------------------------------------------
             # Series
@@ -689,7 +891,7 @@ class IMDBKit:
 
                 for season in tmdb_data.get(
                     "seasons",
-                    []
+                    [],
                 ):
 
                     if not isinstance(
@@ -710,7 +912,10 @@ class IMDBKit:
                             "season": season_number,
                             "name": (
                                 season.get("name")
-                                or f"Season {season_number}"
+                                or (
+                                    f"Season "
+                                    f"{season_number}"
+                                )
                             ),
                             "episodes": season.get(
                                 "episode_count"
@@ -730,7 +935,9 @@ class IMDBKit:
                 kind = "movie"
 
                 box_office = (
-                    tmdb_data.get("revenue")
+                    tmdb_data.get(
+                        "revenue"
+                    )
                     or None
                 )
 
@@ -759,7 +966,8 @@ class IMDBKit:
         # --------------------------------------------------------
 
         imdb_url = (
-            f"https://www.imdb.com/title/{imdb_id}/"
+            f"https://www.imdb.com/title/"
+            f"{imdb_id}/"
             if imdb_id
             else None
         )
@@ -838,12 +1046,12 @@ class IMDBKit:
 
             movies = tmdb_find.get(
                 "movie_results",
-                []
+                [],
             )
 
             tv_results = tmdb_find.get(
                 "tv_results",
-                []
+                [],
             )
 
             if movies:
@@ -915,7 +1123,9 @@ class IMDBKit:
         Return movie metadata as a dictionary.
         """
 
-        movie = self.get_movie(movie_id)
+        movie = self.get_movie(
+            movie_id
+        )
 
         return movie.to_dict()
 
