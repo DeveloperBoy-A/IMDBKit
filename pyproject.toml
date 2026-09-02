@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "imdbkit"
+version = "1.0.0"
+description = "Lightweight IMDb and TMDB metadata library for Python bots"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+
+authors = [
+    {name = "DeveloperBoy-A"}
+]
+
+dependencies = []
+
+
+[tool.setuptools]
+include-package-data = true
+
+
+[tool.setuptools.packages.find]
+include = ["imdbkit*"]
