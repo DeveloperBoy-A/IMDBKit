@@ -238,46 +238,53 @@ class IMDBKit:
 
     @staticmethod
     def _devanagari_to_roman(text: str) -> str:
-        """Converts Hindi Devanagari script queries to Roman/English phonetics for IMDb lookup."""
+        """Universal Devanagari to Roman/English Phonetic Transliteration Engine."""
         if not text:
             return ""
         
-        # Mapping for common Hindi characters/words
-        mapping = {
-            "पठान": "pathaan",
-            "स्त्री": "stree",
-            "पद्maवत": "padmaavat",
-            "दृश्यम": "drishyam",
-            "जवान": "jawan",
-            "गदर": "gadar",
-            "एनिमल": "animal",
-            "आरआरआर": "rrr",
-            "दंगल": "dangal",
-            "शोले": "sholay"
+        # Comprehensive Devanagari Unicode mapping
+        dev_map = {
+            'अ': 'a', 'आ': 'aa', 'इ': 'i', 'ई': 'ee', 'उ': 'u', 'ऊ': 'oo', 'ऋ': 'ri', 'ए': 'e', 'ऐ': 'ai', 'ओ': 'o', 'औ': 'au',
+            'क': 'k', 'ख': 'kh', 'ग': 'g', 'घ': 'gh', 'ङ': 'n',
+            'च': 'ch', 'छ': 'chh', 'ज': 'j', 'झ': 'jh', 'ञ': 'n',
+            'ट': 't', 'ठ': 'th', 'ड': 'd', 'ढ': 'dh', 'ण': 'n',
+            'त': 't', 'थ': 'th', 'द': 'd', 'ध': 'dh', 'न': 'n',
+            'प': 'p', 'फ': 'ph', 'ब': 'b', 'भ': 'bh', 'म': 'm',
+            'य': 'y', 'र': 'r', 'ल': 'l', 'व': 'v',
+            'श': 'sh', 'ष': 'sh', 'स': 's', 'ह': 'h',
+            'क्ष': 'ksh', 'त्र': 'tr', 'ज्ञ': 'gy',
+            # Matras & Signs
+            'ा': 'aa', 'ि': 'i', 'ी': 'ee', 'ु': 'u', 'ू': 'oo', 'ृ': 'ri', 'े': 'e', 'ै': 'ai', 'ो': 'o', 'ौ': 'au',
+            'ं': 'n', 'ः': 'h', '्': '', 'ँ': 'n',
+            # Numbers
+            '०': '0', '१': '1', '२': '2', '३': '3', '४': '4', '५': '5', '६': '6', '७': '7', '८': '8', '९': '9'
         }
-        
-        # Check direct word matches first
-        words = text.split()
+
+        # Popular popular words shortcut lookup for extra speed
+        common_hindi = {
+            "पठान": "pathaan", "स्त्री": "stree", "जवान": "jawan", "गदर": "gadar",
+            "एनिमल": "animal", "दृश्यम": "drishyam", "दंगल": "dangal", "शोले": "sholay",
+            "पंचायत": "panchayat", "मिर्जापुर": "mirzapur", "सुपर 30": "super 30",
+            "आरआरआर": "rrr", "केजीएफ": "kgf", "पुष्पा": "pushpa"
+        }
+
+        text_stripped = text.strip()
+        if text_stripped in common_hindi:
+            return common_hindi[text_stripped]
+
+        # Character by character phonetic conversion
         converted = []
-        for w in words:
-            if w in mapping:
-                converted.append(mapping[w])
+        skip_next = False
+        chars = list(text_stripped)
+        
+        for i, char in enumerate(chars):
+            if char in dev_map:
+                converted.append(dev_map[char])
             else:
-                # Basic fallback transliteration mapping for basic Devanagari letters
-                dev_map = {
-                    'अ': 'a', 'आ': 'aa', 'इ': 'i', 'ई': 'ee', 'उ': 'u', 'ऊ': 'oo', 'ए': 'e', 'ऐ': 'ai', 'ओ': 'o', 'औ': 'au',
-                    'क': 'k', 'ख': 'kh', 'ग': 'g', 'घ': 'gh', 'ङ': 'n',
-                    'च': 'ch', 'छ': 'chh', 'ज': 'j', 'झ': 'jh', 'ञ': 'n',
-                    'ट': 't', 'ठ': 'th', 'ड': 'd', 'ढ': 'dh', 'ण': 'n',
-                    'त': 't', 'थ': 'th', 'द': 'd', 'ध': 'dh', 'न': 'n',
-                    'प': 'p', 'फ': 'f', 'ब': 'b', 'भ': 'bh', 'म': 'm',
-                    'य': 'y', 'र': 'r', 'ल': 'l', 'व': 'v',
-                    'श': 'sh', 'ष': 'sh', 'स': 's', 'ह': 'h',
-                    'ा': 'aa', 'ि': 'i', 'ी': 'ee', 'ु': 'u', 'ू': 'oo', 'े': 'e', 'ै': 'ai', 'ो': 'o', 'ौ': 'au', '्': ''
-                }
-                w_conv = "".join([dev_map.get(char, char) for char in w])
-                converted.append(w_conv)
-        return " ".join(converted)
+                converted.append(char) # Keep spaces or English characters intact
+
+        return "".join(converted)
+
 
     @staticmethod
     def _normalize_imdb_id(
