@@ -661,6 +661,27 @@ class IMDBKit:
             IMDBKit._normalize_search_text(query)
         )
 
+        # Ignore release year during title relevance matching.
+        # The year is used later for ranking.
+        query_year = (
+            IMDBKit._extract_year_from_query(
+                query
+            )
+        )
+
+        if query_year:
+            query_normalized = re.sub(
+                rf"\b{query_year}\b",
+                "",
+                query_normalized,
+            )
+
+            query_normalized = re.sub(
+                r"\s+",
+                " ",
+                query_normalized,
+            ).strip()
+
         title_normalized = (
             IMDBKit._normalize_search_text(
                 item.title
@@ -734,7 +755,6 @@ class IMDBKit:
             return True
 
         return score >= 62
-
     # ============================================================
     # Smart Media Title Parser
     # ============================================================
