@@ -2,12 +2,14 @@ import json
 import logging
 import os
 import re
+import unicodedata
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-from .models import Movie, SearchResult, SeriesInfo, Title
+from rapidfuzz import fuzz
 
+from .models import Movie, SearchResult, SeriesInfo, Title
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +239,214 @@ class IMDBKit:
         return None
 
     @staticmethod
+    def _normalize_search_text(value: Any) -> str:
+        """
+        Strong normalization for movie/series title matching.
+
+        Handles:
+            - Unicode normalization
+            - punctuation
+            - dots, dashes, underscores
+            - apostrophes
+            - ampersands
+            - repeated whitespace
+            - common filename separators
+        """
+        if value is None:
+            return ""
+
+        value = str(value)
+
+        value = unicodedata.normalize(
+            "NFKC",
+            value,
+        )
+
+        value = value.lower()
+
+        value = value.replace(
+            "&",
+            " and ",
+        )
+
+        value = value.replace(
+            "'",
+            "",
+        )
+
+        value = re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            value,
+        )
+
+        return re.sub(
+            r"\s+",
+            " ",
+            value,
+        ).strip()
+
+    @staticmethod
+    def _search_tokens(value: Any) -> List[str]:
+        normalized = IMDBKit._normalize_search_text(
+            value
+        )
+
+        if not normalized:
+            return []
+
+        return normalized.split()
+
+    @staticmethod
+    def _extract_search_year(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+
+        match = re.search(
+            r"\b(19|20)\d{2}\b",
+            str(value),
+        )
+
+        if match:
+            try:
+                return int(match.group(0))
+            except Exception:
+                return None
+
+        return None
+
+    @staticmethod
+    def _title_match_score(
+        query: str,
+        item: Title,
+    ) -> float:
+        """
+        Multi-layer title ranking.
+
+        Higher score = stronger match.
+        """
+
+        query_normalized = (
+            IMDBKit._normalize_search_text(
+                query
+            )
+        )
+
+        title_normalized = (
+            IMDBKit._normalize_search_text(
+                item.title
+            )
+        )
+
+        if not query_normalized or not title_normalized:
+            return 0.0
+
+        if query_normalized == title_normalized:
+            return 100.0
+
+        query_tokens = set(
+            IMDBKit._search_tokens(
+                query_normalized
+            )
+        )
+
+        title_tokens = set(
+            IMDBKit._search_tokens(
+                title_normalized
+            )
+        )
+
+        token_score = 0.0
+
+        if query_tokens and title_tokens:
+            intersection = (
+                query_tokens & title_tokens
+            )
+
+            token_score = (
+                len(intersection)
+                / max(
+                    len(query_tokens),
+                    len(title_tokens),
+                )
+            ) * 100.0
+
+        ratio = fuzz.ratio(
+            query_normalized,
+            title_normalized,
+        )
+
+        partial = fuzz.partial_ratio(
+            query_normalized,
+            title_normalized,
+        )
+
+        token_ratio = fuzz.token_set_ratio(
+            query_normalized,
+            title_normalized,
+        )
+
+        weighted_score = (
+            (ratio * 0.25)
+            + (partial * 0.20)
+            + (token_ratio * 0.35)
+            + (token_score * 0.20)
+        )
+
+        return weighted_score
+
+    @staticmethod
+    def _is_strong_title_match(
+        query: str,
+        item: Title,
+        score: float,
+    ) -> bool:
+        """
+        Prevent obviously unrelated IMDb suggestions.
+        """
+
+        query_normalized = (
+            IMDBKit._normalize_search_text(
+                query
+            )
+        )
+
+        title_normalized = (
+            IMDBKit._normalize_search_text(
+                item.title
+            )
+        )
+
+        if not query_normalized or not title_normalized:
+            return False
+
+        if query_normalized == title_normalized:
+            return True
+
+        query_tokens = set(
+            IMDBKit._search_tokens(
+                query_normalized
+            )
+        )
+
+        title_tokens = set(
+            IMDBKit._search_tokens(
+                title_normalized
+            )
+        )
+
+        if query_tokens and title_tokens:
+            overlap = (
+                len(query_tokens & title_tokens)
+                / len(query_tokens)
+            )
+
+            if overlap >= 0.5 and score >= 55:
+                return True
+
+        return score >= 68
+
+    @staticmethod
     def _normalize_kind(
         kind: Any,
     ) -> Optional[str]:
@@ -315,15 +525,18 @@ class IMDBKit:
         results: int = 10,
     ) -> SearchResult:
         """
-        Search IMDb titles.
+        Search IMDb titles with advanced matching.
 
-        Returns:
+        Maximum returned suggestions:
+            10
 
-            SearchResult(
-                titles=[
-                    Title(...)
-                ]
-            )
+        Features:
+            - Strong title normalization
+            - Typo/fuzzy matching
+            - Token matching
+            - Duplicate removal
+            - Better ranking
+            - Weak-result filtering
         """
 
         if not title:
@@ -333,6 +546,16 @@ class IMDBKit:
 
         if not title:
             return SearchResult([])
+
+        try:
+            results = int(results)
+        except Exception:
+            results = 10
+
+        results = max(
+            1,
+            min(results, 10),
+        )
 
         encoded = urllib.parse.quote(
             title,
@@ -354,10 +577,10 @@ class IMDBKit:
             [],
         )
 
-        titles = []
+        candidates = []
+        seen_ids = set()
 
         for item in raw_results:
-
             if not isinstance(
                 item,
                 dict,
@@ -374,11 +597,17 @@ class IMDBKit:
             ):
                 continue
 
+            if imdb_id in seen_ids:
+                continue
+
             item_title = (
                 item.get("l")
                 or item.get("title")
                 or ""
             )
+
+            if not item_title:
+                continue
 
             year = self._safe_int(
                 item.get("y")
@@ -391,7 +620,10 @@ class IMDBKit:
             )
 
             image_url = (
-                item.get("i", {}).get("imageUrl")
+                item.get(
+                    "i",
+                    {}
+                ).get("imageUrl")
                 if isinstance(
                     item.get("i"),
                     dict,
@@ -399,38 +631,51 @@ class IMDBKit:
                 else None
             )
 
-            titles.append(
-                Title(
-                    imdb_id=imdb_id,
-                    title=item_title,
-                    year=year,
-                    kind=kind,
-                    image_url=image_url,
+            result = Title(
+                imdb_id=imdb_id,
+                title=item_title,
+                year=year,
+                kind=kind,
+                image_url=image_url,
+            )
+
+            score = self._title_match_score(
+                title,
+                result,
+            )
+
+            if not self._is_strong_title_match(
+                title,
+                result,
+                score,
+            ):
+                continue
+
+            seen_ids.add(imdb_id)
+
+            candidates.append(
+                (
+                    score,
+                    result,
                 )
             )
 
-            if len(titles) >= results:
-                break
-
         # --------------------------------------------------------
-        # Fallback local fuzzy sorting
+        # Final ranking
         # --------------------------------------------------------
 
-        try:
-            from rapidfuzz import fuzz
+        candidates.sort(
+            key=lambda item: (
+                item[0],
+                item[1].year or 0,
+            ),
+            reverse=True,
+        )
 
-            query = title.lower()
-
-            titles.sort(
-                key=lambda item: fuzz.ratio(
-                    query,
-                    item.title.lower(),
-                ),
-                reverse=True,
-            )
-
-        except Exception:
-            pass
+        titles = [
+            item[1]
+            for item in candidates[:results]
+        ]
 
         return SearchResult(titles)
 
