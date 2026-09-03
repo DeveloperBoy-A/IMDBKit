@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 class TTLCache:
     """Thread-safe TTL Cache with Negative/Error Caching support."""
-    def __init__(self, ttl: int = 86400, negative_ttl: int = 300, maxsize: int = 1000):
+    def __init__(self, ttl: int = 86400, negative_ttl: int = 300, maxsize: int = 3000):
         self.ttl = ttl
         self.negative_ttl = negative_ttl
         self.maxsize = maxsize
@@ -37,7 +37,6 @@ class TTLCache:
             timestamp, value = self._cache[key]
             current_time = time.time()
             
-            # Determine if it's a negative/empty response entry
             is_empty = value is None or (isinstance(value, (list, dict)) and not value)
             current_ttl = self.negative_ttl if is_empty else self.ttl
 
@@ -49,7 +48,6 @@ class TTLCache:
     def set(self, key: str, value: Any):
         with self._lock:
             if len(self._cache) >= self.maxsize:
-                # Evict oldest entry
                 oldest_key = min(self._cache, key=lambda k: self._cache[k][0])
                 del self._cache[oldest_key]
             self._cache[key] = (time.time(), value)
@@ -99,9 +97,9 @@ class IMDBKit:
     TMDB_BASE_URL = "https://api.themoviedb.org/3"
 
     # Global Shared Caches across instances
-    _imdb_cache = TTLCache(ttl=86400, negative_ttl=300, maxsize=2000)
-    _imdb_id_cache = TTLCache(ttl=172800, negative_ttl=600, maxsize=2000)
-    _tmdb_cache = TTLCache(ttl=172800, negative_ttl=600, maxsize=2000)
+    _imdb_cache = TTLCache(ttl=86400, negative_ttl=300, maxsize=3000)
+    _imdb_id_cache = TTLCache(ttl=172800, negative_ttl=600, maxsize=3000)
+    _tmdb_cache = TTLCache(ttl=172800, negative_ttl=600, maxsize=3000)
     _coalescer = RequestCoalescer()
 
     def __init__(
@@ -213,7 +211,6 @@ class IMDBKit:
         params: Optional[Dict[str, Any]] = None,
         cache_tier: str = "imdb",
     ) -> Optional[Dict[str, Any]]:
-        """Handles HTTP requests with TTL Caching and Concurrent Request Coalescing."""
         cache_key = url
         if params:
             cache_key += "?" + urllib.parse.urlencode(sorted(params.items()))
@@ -324,16 +321,14 @@ class IMDBKit:
 
     @staticmethod
     def _roman_hindi_phonetic_normalize(text: str) -> str:
-        """Standardizes Roman-Hindi phonetic variations and common misspellings."""
         if not text:
             return ""
         t = text.lower()
-        # Common spelling/phonetic substitutions for Indian content
         t = re.sub(r"\b(sh|s)ree\b", "shri", t)
         t = re.sub(r"\bk(?:h)?a(?:n)?g(?:h)?a?r\b", "khangar", t)
         t = t.replace("ph", "f")
         t = t.replace("oo", "u").replace("ee", "i")
-        t = re.sub(r"([bcdfghjklmnpqrstvwxyz])\1+", r"\1", t) # Collapse double consonants like 'll', 'kk'
+        t = re.sub(r"([bcdfghjklmnpqrstvwxyz])\1+", r"\1", t)
         return t
 
     @staticmethod
@@ -348,17 +343,14 @@ class IMDBKit:
             str(value),
         ).lower()
 
-        # Common title separators
         value = value.replace("&", " and ")
         value = value.replace("@", " at ")
 
-        # Remove apostrophes without splitting words
         value = value.replace("'", "")
         value = value.replace("’", "")
 
-        # Convert all punctuation/separators to spaces
         value = re.sub(
-            r"[^a-z0-9\u0900-\u097F]+", # Preserves Hindi Devanagari range as well
+            r"[^a-z0-9\u0900-\u097F]+",
             " ",
             value,
         )
@@ -546,7 +538,6 @@ class IMDBKit:
         ):
             score += 22.0
 
-        # Numeric / Sequel tracking
         query_numbers = set(
             re.findall(
                 r"\b\d+\b",
@@ -612,6 +603,7 @@ class IMDBKit:
         }
 
         series_types = {
+            "web series",
             "tv series",
             "tv-series",
             "series",
@@ -620,6 +612,7 @@ class IMDBKit:
             "tv limited series",
             "tvseries",
             "tvminiseries",
+            "mini series",
         }
 
         low_priority_types = {
@@ -632,6 +625,7 @@ class IMDBKit:
             "tv short",
             "tv movie",
             "tvmovie",
+            "musicvideo",
         }
 
         if kind in movie_types:
@@ -905,7 +899,6 @@ class IMDBKit:
         season = None
         episode = None
 
-        # Comprehensive Season & Episode format parser
         match = re.search(
             r"\bS(\d{1,3})E(\d{1,3})\b",
             text,
@@ -1009,6 +1002,7 @@ class IMDBKit:
             "podcastseries": "Podcasts",
             "tvepisode": "Episode",
             "tv episode": "Episode",
+            "musicvideo": "Music Video",
         }
 
         return mapping.get(
@@ -1018,7 +1012,6 @@ class IMDBKit:
 
     @staticmethod
     def _filter_unwanted_kinds(kind: Optional[str]) -> bool:
-        """Filters out Games, Podcasts, Shorts, Videos, Music Videos, and Episodes."""
         if not kind:
             return True
         k = kind.lower()
@@ -1026,7 +1019,7 @@ class IMDBKit:
             "games", "game", "video game", "videogame",
             "podcast", "podcastseries", "podcasts",
             "short", "tv short", "video", "music video",
-            "episode", "tvepisode", "tv episode"
+            "musicvideo", "episode", "tvepisode", "tv episode"
         }
         return k not in unwanted
 
@@ -1068,20 +1061,11 @@ class IMDBKit:
 
         return result
 
-    # ============================================================
-    # IMDb Search (with duplicate cleanup & category filtering)
-    # ============================================================
-
     def search_movie(
         self,
         title: str,
         results: int = 10,
     ) -> SearchResult:
-        """
-        Search IMDb titles with Devanagari/Roman-Hindi correction, sequel matching,
-        year tracking, and filtering of non-media types (Games, Shorts, etc.).
-        """
-
         if not title:
             return SearchResult([])
 
@@ -1168,7 +1152,6 @@ class IMDBKit:
                 or item.get("kind")
             )
 
-            # Exclude unwanted media categories (Games, Podcasts, Shorts, Episodes, etc.)
             if not self._filter_unwanted_kinds(kind):
                 continue
 
@@ -1235,10 +1218,6 @@ class IMDBKit:
 
         return SearchResult(titles)
 
-    # ============================================================
-    # IMDb ID Search
-    # ============================================================
-
     def _find_imdb_title(
         self,
         imdb_id: str,
@@ -1298,10 +1277,6 @@ class IMDBKit:
             )
 
         return None
-
-    # ============================================================
-    # TMDB (with Cache & Coalescing)
-    # ============================================================
 
     def _tmdb_find(
         self,
@@ -1365,10 +1340,6 @@ class IMDBKit:
             return res
 
         return self._coalescer.execute(cache_key, fetch)
-
-    # ============================================================
-    # Movie Builder
-    # ============================================================
 
     def _build_movie(
         self,
@@ -1759,18 +1730,10 @@ class IMDBKit:
             original_title=original_title,
         )
 
-    # ============================================================
-    # Get Movie
-    # ============================================================
-
     def get_movie(
         self,
         movie_id: Any,
     ) -> Movie:
-        """
-        Fetch complete movie/series metadata with preserved existing compatibility.
-        """
-
         imdb_id = self._normalize_imdb_id(
             movie_id
         )
@@ -1831,10 +1794,6 @@ class IMDBKit:
             media_type=media_type,
         )
 
-    # ============================================================
-    # Legacy Compatibility
-    # ============================================================
-
     def update(
         self,
         movie: Movie,
@@ -1843,10 +1802,6 @@ class IMDBKit:
         **kwargs,
     ) -> Movie:
         return movie
-
-    # ============================================================
-    # Convenience
-    # ============================================================
 
     def get_movie_details(
         self,
