@@ -239,41 +239,26 @@ class IMDBKit:
         return None
 
     @staticmethod
-    def _normalize_search_text(value: Any) -> str:
-        """
-        Strong normalization for movie/series title matching.
-
-        Handles:
-            - Unicode normalization
-            - punctuation
-            - dots, dashes, underscores
-            - apostrophes
-            - ampersands
-            - repeated whitespace
-            - common filename separators
-        """
+    def _normalize_search_text(
+        value: Any,
+    ) -> str:
         if value is None:
             return ""
 
-        value = str(value)
-
         value = unicodedata.normalize(
             "NFKC",
-            value,
-        )
+            str(value),
+        ).lower()
 
-        value = value.lower()
+        # Common title separators
+        value = value.replace("&", " and ")
+        value = value.replace("@", " at ")
 
-        value = value.replace(
-            "&",
-            " and ",
-        )
+        # Remove apostrophes without splitting words
+        value = value.replace("'", "")
+        value = value.replace("’", "")
 
-        value = value.replace(
-            "'",
-            "",
-        )
-
+        # Convert all punctuation/separators to spaces
         value = re.sub(
             r"[^a-z0-9]+",
             " ",
@@ -287,9 +272,11 @@ class IMDBKit:
         ).strip()
 
     @staticmethod
-    def _search_tokens(value: Any) -> List[str]:
-        normalized = IMDBKit._normalize_search_text(
-            value
+    def _tokenize_search_text(
+        value: Any,
+    ) -> List[str]:
+        normalized = (
+            IMDBKit._normalize_search_text(value)
         )
 
         if not normalized:
@@ -298,8 +285,10 @@ class IMDBKit:
         return normalized.split()
 
     @staticmethod
-    def _extract_search_year(value: Any) -> Optional[int]:
-        if value is None:
+    def _extract_year_from_query(
+        value: Any,
+    ) -> Optional[int]:
+        if not value:
             return None
 
         match = re.search(
@@ -307,29 +296,21 @@ class IMDBKit:
             str(value),
         )
 
-        if match:
-            try:
-                return int(match.group(0))
-            except Exception:
-                return None
+        if not match:
+            return None
 
-        return None
+        try:
+            return int(match.group(0))
+        except Exception:
+            return None
 
     @staticmethod
-    def _title_match_score(
+    def _calculate_title_score(
         query: str,
         item: Title,
     ) -> float:
-        """
-        Multi-layer title ranking.
-
-        Higher score = stronger match.
-        """
-
         query_normalized = (
-            IMDBKit._normalize_search_text(
-                query
-            )
+            IMDBKit._normalize_search_text(query)
         )
 
         title_normalized = (
@@ -341,35 +322,9 @@ class IMDBKit:
         if not query_normalized or not title_normalized:
             return 0.0
 
+        # Perfect normalized match
         if query_normalized == title_normalized:
             return 100.0
-
-        query_tokens = set(
-            IMDBKit._search_tokens(
-                query_normalized
-            )
-        )
-
-        title_tokens = set(
-            IMDBKit._search_tokens(
-                title_normalized
-            )
-        )
-
-        token_score = 0.0
-
-        if query_tokens and title_tokens:
-            intersection = (
-                query_tokens & title_tokens
-            )
-
-            token_score = (
-                len(intersection)
-                / max(
-                    len(query_tokens),
-                    len(title_tokens),
-                )
-            ) * 100.0
 
         ratio = fuzz.ratio(
             query_normalized,
@@ -381,34 +336,54 @@ class IMDBKit:
             title_normalized,
         )
 
-        token_ratio = fuzz.token_set_ratio(
+        token_sort = fuzz.token_sort_ratio(
             query_normalized,
             title_normalized,
         )
 
-        weighted_score = (
-            (ratio * 0.25)
-            + (partial * 0.20)
-            + (token_ratio * 0.35)
-            + (token_score * 0.20)
+        token_set = fuzz.token_set_ratio(
+            query_normalized,
+            title_normalized,
         )
 
-        return weighted_score
+        query_tokens = set(
+            IMDBKit._tokenize_search_text(
+                query_normalized
+            )
+        )
+
+        title_tokens = set(
+            IMDBKit._tokenize_search_text(
+                title_normalized
+            )
+        )
+
+        overlap = 0.0
+
+        if query_tokens:
+            overlap = (
+                len(query_tokens & title_tokens)
+                / len(query_tokens)
+            ) * 100.0
+
+        score = (
+            (ratio * 0.20)
+            + (partial * 0.20)
+            + (token_sort * 0.20)
+            + (token_set * 0.25)
+            + (overlap * 0.15)
+        )
+
+        return score
 
     @staticmethod
-    def _is_strong_title_match(
+    def _is_good_search_match(
         query: str,
         item: Title,
         score: float,
     ) -> bool:
-        """
-        Prevent obviously unrelated IMDb suggestions.
-        """
-
         query_normalized = (
-            IMDBKit._normalize_search_text(
-                query
-            )
+            IMDBKit._normalize_search_text(query)
         )
 
         title_normalized = (
@@ -424,27 +399,28 @@ class IMDBKit:
             return True
 
         query_tokens = set(
-            IMDBKit._search_tokens(
+            IMDBKit._tokenize_search_text(
                 query_normalized
             )
         )
 
         title_tokens = set(
-            IMDBKit._search_tokens(
+            IMDBKit._tokenize_search_text(
                 title_normalized
             )
         )
 
-        if query_tokens and title_tokens:
+        if query_tokens:
             overlap = (
                 len(query_tokens & title_tokens)
                 / len(query_tokens)
             )
 
-            if overlap >= 0.5 and score >= 55:
+            if overlap >= 0.5 and score >= 50:
                 return True
 
-        return score >= 68
+        return score >= 65
+
 
     @staticmethod
     def _normalize_kind(
@@ -525,18 +501,9 @@ class IMDBKit:
         results: int = 10,
     ) -> SearchResult:
         """
-        Search IMDb titles with advanced matching.
+        Search IMDb titles with advanced fuzzy matching.
 
-        Maximum returned suggestions:
-            10
-
-        Features:
-            - Strong title normalization
-            - Typo/fuzzy matching
-            - Token matching
-            - Duplicate removal
-            - Better ranking
-            - Weak-result filtering
+        Maximum returned results: 10
         """
 
         if not title:
@@ -552,6 +519,7 @@ class IMDBKit:
         except Exception:
             results = 10
 
+        # Never allow more than 10 suggestions.
         results = max(
             1,
             min(results, 10),
@@ -580,6 +548,12 @@ class IMDBKit:
         candidates = []
         seen_ids = set()
 
+        query_year = (
+            self._extract_year_from_query(
+                title
+            )
+        )
+
         for item in raw_results:
             if not isinstance(
                 item,
@@ -597,6 +571,7 @@ class IMDBKit:
             ):
                 continue
 
+            # Remove duplicate IMDb IDs.
             if imdb_id in seen_ids:
                 continue
 
@@ -622,7 +597,7 @@ class IMDBKit:
             image_url = (
                 item.get(
                     "i",
-                    {}
+                    {},
                 ).get("imageUrl")
                 if isinstance(
                     item.get("i"),
@@ -639,17 +614,36 @@ class IMDBKit:
                 image_url=image_url,
             )
 
-            score = self._title_match_score(
+            score = self._calculate_title_score(
                 title,
                 result,
             )
 
-            if not self._is_strong_title_match(
+            if not self._is_good_search_match(
                 title,
                 result,
                 score,
             ):
                 continue
+
+            # Year bonus when user explicitly searched a year.
+            if (
+                query_year
+                and year
+                and year == query_year
+            ):
+                score += 12.0
+
+            # Small preference for exact title.
+            if (
+                self._normalize_search_text(
+                    title
+                )
+                == self._normalize_search_text(
+                    item_title
+                )
+            ):
+                score += 20.0
 
             seen_ids.add(imdb_id)
 
@@ -660,21 +654,19 @@ class IMDBKit:
                 )
             )
 
-        # --------------------------------------------------------
-        # Final ranking
-        # --------------------------------------------------------
-
+        # Highest quality matches first.
         candidates.sort(
-            key=lambda item: (
-                item[0],
-                item[1].year or 0,
+            key=lambda pair: (
+                pair[0],
+                pair[1].year or 0,
             ),
             reverse=True,
         )
 
+        # Final maximum = 10.
         titles = [
-            item[1]
-            for item in candidates[:results]
+            item
+            for _, item in candidates[:results]
         ]
 
         return SearchResult(titles)
