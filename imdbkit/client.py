@@ -421,6 +421,197 @@ class IMDBKit:
 
         return score >= 65
 
+    # ============================================================
+    # Smart Media Title Parser
+    # ============================================================
+
+    @staticmethod
+    def clean_media_title(
+        value: Any,
+    ) -> str:
+        """
+        Clean a filename/search string and extract
+        a useful movie or series title.
+        """
+
+        if not value:
+            return ""
+
+        text = unicodedata.normalize(
+            "NFKC",
+            str(value),
+        )
+
+        # Remove file extension
+        text = re.sub(
+            r"\.(mkv|mp4|avi|mov|webm|m4v)$",
+            "",
+            text,
+            flags=re.I,
+        )
+
+        # Replace common separators
+        text = re.sub(
+            r"[_\.]+",
+            " ",
+            text,
+        )
+
+        # Remove release/technical metadata
+        text = re.sub(
+            r"\b(?:"
+            r"\d{3,4}p|"
+            r"\d{3,4}x\d{3,4}|"
+            r"4k|8k|"
+            r"2160p|1080p|720p|480p|"
+            r"10bit|8bit|"
+            r"x264|x265|h264|h265|hevc|av1|"
+            r"web[- ]?dl|web[- ]?rip|webrip|"
+            r"blu[- ]?ray|brrip|brip|"
+            r"hdrip|hdtv|dvdrip|"
+            r"cam|hdcam|ts|telesync|"
+            r"aac|ac3|ddp|dd5\.1|"
+            r"atmos|"
+            r"proper|repack|remastered|"
+            r"extended|uncut|"
+            r"dual[ -]?audio|multi[ -]?audio|"
+            r"nf|amzn|prime|"
+            r"season|episode"
+            r")\b",
+            " ",
+            text,
+            flags=re.I,
+        )
+
+        # Remove season/episode markers.
+        text = re.sub(
+            r"\bS\d{1,3}(?:[-_ ]?S\d{1,3})?\b",
+            " ",
+            text,
+            flags=re.I,
+        )
+
+        text = re.sub(
+            r"\bS\d{1,3}E\d{1,3}\b",
+            " ",
+            text,
+            flags=re.I,
+        )
+
+        text = re.sub(
+            r"\b\d{1,2}x\d{1,3}\b",
+            " ",
+            text,
+            flags=re.I,
+        )
+
+        # Remove year only when it looks like release metadata.
+        text = re.sub(
+            r"\b(?:19|20)\d{2}\b",
+            " ",
+            text,
+        )
+
+        # Normalize remaining punctuation.
+        text = re.sub(
+            r"[^A-Za-z0-9]+",
+            " ",
+            text,
+        )
+
+        return re.sub(
+            r"\s+",
+            " ",
+            text,
+        ).strip() 
+    @staticmethod
+    def parse_media_structure(
+        value: Any,
+    ) -> Dict[str, Any]:
+        """
+        Detect year, season and episode information
+        from movie/series filenames or searches.
+        """
+
+        if not value:
+            return {
+                "title": "",
+                "year": None,
+                "season": None,
+                "episode": None,
+                "is_series": False,
+            }
+
+        text = str(value)
+
+        year = IMDBKit._extract_year_from_query(
+            text
+        )
+
+        season = None
+        episode = None
+
+        # S01E05 / s01e05
+        match = re.search(
+            r"\bS(\d{1,3})E(\d{1,3})\b",
+            text,
+            flags=re.I,
+        )
+
+        if match:
+            season = int(match.group(1))
+            episode = int(match.group(2))
+
+        else:
+            # 1x05
+            match = re.search(
+                r"\b(\d{1,3})x(\d{1,3})\b",
+                text,
+                flags=re.I,
+            )
+
+            if match:
+                season = int(match.group(1))
+                episode = int(match.group(2))
+
+        if season is None:
+            # Season 1 / Season01
+            match = re.search(
+                r"\bSeason[\s._-]*(\d{1,3})\b",
+                text,
+                flags=re.I,
+            )
+
+            if match:
+                season = int(match.group(1))
+
+        if season is None:
+            # S01
+            match = re.search(
+                r"\bS(\d{1,3})\b",
+                text,
+                flags=re.I,
+            )
+
+            if match:
+                season = int(match.group(1))
+
+        is_series = (
+            season is not None
+            or episode is not None
+        )
+
+        clean_title = (
+            IMDBKit.clean_media_title(text)
+        )
+
+        return {
+            "title": clean_title,
+            "year": year,
+            "season": season,
+            "episode": episode,
+            "is_series": is_series,
+        }
 
     @staticmethod
     def _normalize_kind(
