@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import socket
 import unicodedata
 import urllib.parse
 import urllib.request
@@ -115,18 +116,11 @@ class IMDBKit:
 
             return None
 
-        except urllib.error.URLError as exc:
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
             logger.error(
-                "IMDBKit network error for %s: %s",
+                "IMDBKit network/timeout error for %s: %s",
                 url.split("?")[0],
-                exc.reason,
-            )
-            return None
-
-        except TimeoutError:
-            logger.error(
-                "IMDBKit request timed out: %s",
-                url.split("?")[0],
+                getattr(exc, "reason", exc),
             )
             return None
 
@@ -309,32 +303,34 @@ class IMDBKit:
         query: str,
         item: Title,
     ) -> float:
-        """
-        Advanced title relevance scoring.
-
-        Handles:
-        - Exact title matching
-        - Spelling mistakes
-        - Missing/extra letters
-        - Joined/separated words
-        - Token matching
-        - Prefix/phrase matching
-        - Sequel numbers
-        - Movie/TV relevance
-        - Future/upcoming titles
-        - Short/video/game/podcast suppression
-        """
-
         query_normalized = (
             IMDBKit._normalize_search_text(query)
         )
+
+        query_year = (
+            IMDBKit._extract_year_from_query(
+                query
+            )
+        )
+
+        if query_year:
+            query_normalized = re.sub(
+                rf"\b{query_year}\b",
+                "",
+                query_normalized,
+            )
+
+            query_normalized = re.sub(
+                r"\s+",
+                " ",
+                query_normalized,
+            ).strip()
 
         title_normalized = (
             IMDBKit._normalize_search_text(
                 item.title
             )
         )
-
         if not query_normalized or not title_normalized:
             return 0.0
 
@@ -352,10 +348,6 @@ class IMDBKit:
                 title_normalized
             )
         )
-
-        # --------------------------------------------------
-        # BASIC FUZZY SCORES
-        # --------------------------------------------------
 
         ratio = fuzz.ratio(
             query_normalized,
@@ -382,10 +374,6 @@ class IMDBKit:
             title_normalized,
         )
 
-        # --------------------------------------------------
-        # TOKEN OVERLAP
-        # --------------------------------------------------
-
         overlap = 0.0
 
         if query_tokens:
@@ -393,10 +381,6 @@ class IMDBKit:
                 len(query_tokens & title_tokens)
                 / len(query_tokens)
             ) * 100.0
-
-        # --------------------------------------------------
-        # LENGTH SIMILARITY
-        # --------------------------------------------------
 
         length_score = 0.0
 
@@ -422,10 +406,6 @@ class IMDBKit:
                     * 100.0,
                 )
 
-        # --------------------------------------------------
-        # BASE SCORE
-        # --------------------------------------------------
-
         score = (
             (ratio * 0.23)
             + (compact_ratio * 0.22)
@@ -436,19 +416,11 @@ class IMDBKit:
             + (length_score * 0.06)
         )
 
-        # --------------------------------------------------
-        # EXACT MATCH
-        # --------------------------------------------------
-
         if query_normalized == title_normalized:
             score += 45.0
 
         if query_compact == title_compact:
             score += 25.0
-
-        # --------------------------------------------------
-        # PREFIX / PHRASE MATCH
-        # --------------------------------------------------
 
         if (
             len(query_normalized) >= 4
@@ -466,20 +438,11 @@ class IMDBKit:
         ):
             score += 18.0
 
-        # Example:
-        # "the vvaan"
-        # ->
-        # "the vvaan force of the forrest"
-
         if (
             query_tokens
             and query_tokens.issubset(title_tokens)
         ):
             score += 22.0
-
-        # --------------------------------------------------
-        # NUMERIC / SEQUEL MATCH
-        # --------------------------------------------------
 
         query_numbers = set(
             re.findall(
@@ -501,20 +464,11 @@ class IMDBKit:
             else:
                 score -= 18.0
 
-        # Example:
-        # "sardar 2"
-        # must prefer "Sardar 2"
-        # over "Sardar"
-
         if (
             query_numbers
             and not title_numbers
         ):
             score -= 30.0
-
-        # --------------------------------------------------
-        # BASE TITLE MATCH
-        # --------------------------------------------------
 
         query_without_numbers = re.sub(
             r"\b\d+\b",
@@ -541,10 +495,6 @@ class IMDBKit:
                 score += 18.0
             elif base_ratio >= 85:
                 score += 10.0
-
-        # --------------------------------------------------
-        # MEDIA TYPE RELEVANCE
-        # --------------------------------------------------
 
         kind = (
             str(item.kind or "")
@@ -580,19 +530,12 @@ class IMDBKit:
             "tvmovie",
         }
 
-        # Default preference for actual movies/series.
         if kind in movie_types:
             score += 12.0
-
         elif kind in series_types:
             score += 10.0
-
         elif kind in low_priority_types:
             score -= 22.0
-
-        # --------------------------------------------------
-        # TITLE TYPE WORDS
-        # --------------------------------------------------
 
         query_has_series_hint = any(
             word in query_tokens
@@ -610,10 +553,6 @@ class IMDBKit:
             elif kind in movie_types:
                 score -= 8.0
 
-        # --------------------------------------------------
-        # VERY STRONG CLOSE MATCH
-        # --------------------------------------------------
-
         if (
             len(query_compact) >= 5
             and len(title_compact) >= 5
@@ -628,13 +567,11 @@ class IMDBKit:
                 and compact_difference <= 3
             ):
                 score += 30.0
-
             elif (
                 compact_ratio >= 88
                 and compact_difference <= 3
             ):
                 score += 22.0
-
             elif (
                 compact_ratio >= 84
                 and compact_difference <= 2
@@ -645,24 +582,17 @@ class IMDBKit:
             max(score, 0.0),
             180.0,
         )
-                    
+
     @staticmethod
     def _is_good_search_match(
         query: str,
         item: Title,
         score: float,
     ) -> bool:
-        """
-        Decide whether an IMDb result is actually relevant
-        to the user's search.
-        """
-
         query_normalized = (
             IMDBKit._normalize_search_text(query)
         )
 
-        # Ignore release year during title relevance matching.
-        # The year is used later for ranking.
         query_year = (
             IMDBKit._extract_year_from_query(
                 query
@@ -694,7 +624,6 @@ class IMDBKit:
         ):
             return False
 
-        # Exact title is always valid.
         if query_normalized == title_normalized:
             return True
 
@@ -725,7 +654,6 @@ class IMDBKit:
             ):
                 return True
 
-        # Strong typo match.
         compact_query = (
             query_normalized.replace(
                 " ",
@@ -754,20 +682,15 @@ class IMDBKit:
         ):
             return True
 
+        if query_year:
+            return score >= 20
+
         return score >= 62
-    # ============================================================
-    # Smart Media Title Parser
-    # ============================================================
 
     @staticmethod
     def clean_media_title(
         value: Any,
     ) -> str:
-        """
-        Clean a filename/search string and extract
-        a useful movie or series title.
-        """
-
         if not value:
             return ""
 
@@ -776,7 +699,6 @@ class IMDBKit:
             str(value),
         )
 
-        # Remove file extension
         text = re.sub(
             r"\.(mkv|mp4|avi|mov|webm|m4v)$",
             "",
@@ -784,14 +706,12 @@ class IMDBKit:
             flags=re.I,
         )
 
-        # Replace common separators
         text = re.sub(
             r"[_\.]+",
             " ",
             text,
         )
 
-        # Remove release/technical metadata
         text = re.sub(
             r"\b(?:"
             r"\d{3,4}p|"
@@ -817,7 +737,6 @@ class IMDBKit:
             flags=re.I,
         )
 
-        # Remove season/episode markers.
         text = re.sub(
             r"\bS\d{1,3}(?:[-_ ]?S\d{1,3})?\b",
             " ",
@@ -839,14 +758,12 @@ class IMDBKit:
             flags=re.I,
         )
 
-        # Remove year only when it looks like release metadata.
         text = re.sub(
             r"\b(?:19|20)\d{2}\b",
             " ",
             text,
         )
 
-        # Normalize remaining punctuation.
         text = re.sub(
             r"[^A-Za-z0-9]+",
             " ",
@@ -857,16 +774,12 @@ class IMDBKit:
             r"\s+",
             " ",
             text,
-        ).strip() 
+        ).strip()
+
     @staticmethod
     def parse_media_structure(
         value: Any,
     ) -> Dict[str, Any]:
-        """
-        Detect year, season and episode information
-        from movie/series filenames or searches.
-        """
-
         if not value:
             return {
                 "title": "",
@@ -885,7 +798,6 @@ class IMDBKit:
         season = None
         episode = None
 
-        # S01E05 / s01e05
         match = re.search(
             r"\bS(\d{1,3})E(\d{1,3})\b",
             text,
@@ -895,9 +807,7 @@ class IMDBKit:
         if match:
             season = int(match.group(1))
             episode = int(match.group(2))
-
         else:
-            # 1x05
             match = re.search(
                 r"\b(\d{1,3})x(\d{1,3})\b",
                 text,
@@ -909,7 +819,6 @@ class IMDBKit:
                 episode = int(match.group(2))
 
         if season is None:
-            # Season 1 / Season01
             match = re.search(
                 r"\bSeason[\s._-]*(\d{1,3})\b",
                 text,
@@ -920,7 +829,6 @@ class IMDBKit:
                 season = int(match.group(1))
 
         if season is None:
-            # S01
             match = re.search(
                 r"\bS(\d{1,3})\b",
                 text,
@@ -1016,21 +924,11 @@ class IMDBKit:
 
         return result
 
-    # ============================================================
-    # IMDb Search
-    # ============================================================
-
     def search_movie(
         self,
         title: str,
         results: int = 10,
     ) -> SearchResult:
-        """
-        Search IMDb titles with advanced fuzzy matching.
-
-        Maximum returned results: 10
-        """
-
         if not title:
             return SearchResult([])
 
@@ -1044,7 +942,6 @@ class IMDBKit:
         except Exception:
             results = 10
 
-        # Never allow more than 10 suggestions.
         results = max(
             1,
             min(results, 10),
@@ -1096,7 +993,6 @@ class IMDBKit:
             ):
                 continue
 
-            # Remove duplicate IMDb IDs.
             if imdb_id in seen_ids:
                 continue
 
@@ -1151,7 +1047,6 @@ class IMDBKit:
             ):
                 continue
 
-            # Year bonus when user explicitly searched a year.
             if (
                 query_year
                 and year
@@ -1168,7 +1063,6 @@ class IMDBKit:
                 )
             )
 
-        # Highest quality matches first.
         candidates.sort(
             key=lambda pair: (
                 pair[0],
@@ -1177,17 +1071,12 @@ class IMDBKit:
             reverse=True,
         )
 
-        # Final maximum = 10.
         titles = [
             item
             for _, item in candidates[:results]
         ]
 
         return SearchResult(titles)
-
-    # ============================================================
-    # IMDb ID Search
-    # ============================================================
 
     def _find_imdb_title(
         self,
@@ -1251,10 +1140,6 @@ class IMDBKit:
 
         return None
 
-    # ============================================================
-    # TMDB
-    # ============================================================
-
     def _tmdb_find(
         self,
         imdb_id: str,
@@ -1297,10 +1182,6 @@ class IMDBKit:
                 ),
             },
         )
-
-    # ============================================================
-    # Movie Builder
-    # ============================================================
 
     def _build_movie(
         self,
@@ -1355,11 +1236,6 @@ class IMDBKit:
         original_title = None
 
         if tmdb_data:
-
-            # ----------------------------------------------------
-            # Basic
-            # ----------------------------------------------------
-
             title = (
                 tmdb_data.get("title")
                 or tmdb_data.get("name")
@@ -1400,10 +1276,6 @@ class IMDBKit:
                 )
             )
 
-            # ----------------------------------------------------
-            # Runtime
-            # ----------------------------------------------------
-
             runtime = tmdb_data.get(
                 "runtime"
             )
@@ -1424,10 +1296,6 @@ class IMDBKit:
                 ):
                     runtime = episode_runtime[0]
 
-            # ----------------------------------------------------
-            # Poster
-            # ----------------------------------------------------
-
             poster_path = tmdb_data.get(
                 "poster_path"
             )
@@ -1437,10 +1305,6 @@ class IMDBKit:
                     "https://image.tmdb.org/t/p/w1280"
                     + poster_path
                 )
-
-            # ----------------------------------------------------
-            # Countries
-            # ----------------------------------------------------
 
             countries = [
                 item.get("name")
@@ -1454,10 +1318,6 @@ class IMDBKit:
                 )
                 and item.get("name")
             ]
-
-            # ----------------------------------------------------
-            # Languages
-            # ----------------------------------------------------
 
             languages = [
                 (
@@ -1475,10 +1335,6 @@ class IMDBKit:
                 )
             ]
 
-            # ----------------------------------------------------
-            # Genres
-            # ----------------------------------------------------
-
             genres = [
                 item.get("name")
                 for item in tmdb_data.get(
@@ -1492,10 +1348,6 @@ class IMDBKit:
                 and item.get("name")
             ]
 
-            # ----------------------------------------------------
-            # Alternative titles
-            # ----------------------------------------------------
-
             alternative_titles = tmdb_data.get(
                 "alternative_titles"
             )
@@ -1504,7 +1356,6 @@ class IMDBKit:
                 alternative_titles,
                 dict,
             ):
-
                 alternative_title_list = (
                     alternative_titles.get(
                         "titles",
@@ -1516,9 +1367,7 @@ class IMDBKit:
                     alternative_title_list,
                     list,
                 ):
-
                     for item in alternative_title_list:
-
                         if not isinstance(
                             item,
                             dict,
@@ -1535,10 +1384,6 @@ class IMDBKit:
                                 value
                             )
 
-            # ----------------------------------------------------
-            # Credits
-            # ----------------------------------------------------
-
             credits = tmdb_data.get(
                 "credits",
                 {},
@@ -1548,12 +1393,10 @@ class IMDBKit:
                 credits,
                 dict,
             ):
-
                 for person in credits.get(
                     "cast",
                     [],
                 )[:20]:
-
                     if not isinstance(
                         person,
                         dict,
@@ -1571,7 +1414,6 @@ class IMDBKit:
                     "crew",
                     [],
                 ):
-
                     if not isinstance(
                         person,
                         dict,
@@ -1604,13 +1446,11 @@ class IMDBKit:
                         and job == "director"
                     ):
                         directors.append(name)
-
                     elif (
                         department == "writing"
                         or "writer" in job
                     ):
                         writers.append(name)
-
                     elif (
                         department == "production"
                         and job in {
@@ -1619,32 +1459,20 @@ class IMDBKit:
                         }
                     ):
                         producers.append(name)
-
-                    elif (
-                        department == "sound"
-                    ):
+                    elif department == "sound":
                         composers.append(name)
-
-                    elif (
-                        department == "camera"
-                    ):
+                    elif department == "camera":
                         cinematographers.append(
                             name
                         )
 
-            # ----------------------------------------------------
-            # Series
-            # ----------------------------------------------------
-
             if media_type == "tv":
-
                 kind = "tv series"
 
                 for season in tmdb_data.get(
                     "seasons",
                     [],
                 ):
-
                     if not isinstance(
                         season,
                         dict,
@@ -1677,12 +1505,7 @@ class IMDBKit:
                         }
                     )
 
-            # ----------------------------------------------------
-            # Movie
-            # ----------------------------------------------------
-
             elif media_type == "movie":
-
                 kind = "movie"
 
                 box_office = (
@@ -1692,12 +1515,7 @@ class IMDBKit:
                     or None
                 )
 
-        # --------------------------------------------------------
-        # IMDb fallback data
-        # --------------------------------------------------------
-
         if imdb_title:
-
             if not poster_url:
                 poster_url = (
                     imdb_title.image_url
@@ -1711,10 +1529,6 @@ class IMDBKit:
 
             if not kind:
                 kind = imdb_title.kind
-
-        # --------------------------------------------------------
-        # IMDb URL
-        # --------------------------------------------------------
 
         imdb_url = (
             f"https://www.imdb.com/title/"
@@ -1758,23 +1572,10 @@ class IMDBKit:
             original_title=original_title,
         )
 
-    # ============================================================
-    # Get Movie
-    # ============================================================
-
     def get_movie(
         self,
         movie_id: Any,
     ) -> Movie:
-        """
-        Fetch complete movie/series metadata.
-
-        Accepts:
-
-            tt0816692
-            0816692
-        """
-
         imdb_id = self._normalize_imdb_id(
             movie_id
         )
@@ -1794,7 +1595,6 @@ class IMDBKit:
         media_type = None
 
         if tmdb_find:
-
             movies = tmdb_find.get(
                 "movie_results",
                 [],
@@ -1806,7 +1606,6 @@ class IMDBKit:
             )
 
             if movies:
-
                 media_type = "movie"
 
                 tmdb_id = movies[0].get(
@@ -1819,7 +1618,6 @@ class IMDBKit:
                 )
 
             elif tv_results:
-
                 media_type = "tv"
 
                 tmdb_id = tv_results[0].get(
@@ -1838,10 +1636,6 @@ class IMDBKit:
             media_type=media_type,
         )
 
-    # ============================================================
-    # Legacy Compatibility
-    # ============================================================
-
     def update(
         self,
         movie: Movie,
@@ -1849,31 +1643,12 @@ class IMDBKit:
         *args,
         **kwargs,
     ) -> Movie:
-        """
-        Legacy Cinemagoer-compatible method.
-
-        Existing old code may call:
-
-            imdb.update(movie, info=['main'])
-
-        IMDBKit already loads metadata in get_movie(),
-        so this simply returns the object.
-        """
-
         return movie
-
-    # ============================================================
-    # Convenience
-    # ============================================================
 
     def get_movie_details(
         self,
         movie_id: Any,
     ) -> Dict[str, Any]:
-        """
-        Return movie metadata as a dictionary.
-        """
-
         movie = self.get_movie(
             movie_id
         )
@@ -1885,10 +1660,6 @@ class IMDBKit:
         title: str,
         results: int = 10,
     ) -> SearchResult:
-        """
-        Alias for search_movie().
-        """
-
         return self.search_movie(
             title,
             results=results,
