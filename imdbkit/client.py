@@ -611,23 +611,6 @@ class IMDBKit:
                 score -= 8.0
 
         # --------------------------------------------------
-        # FUTURE / UPCOMING TITLE SUPPORT
-        # --------------------------------------------------
-
-        # Do NOT punish future titles.
-        # They remain fully eligible for ranking.
-
-        if item.year:
-            try:
-                current_year = 2026
-
-                if item.year >= current_year:
-                    score += 3.0
-
-            except Exception:
-                pass
-
-        # --------------------------------------------------
         # VERY STRONG CLOSE MATCH
         # --------------------------------------------------
 
@@ -1154,7 +1137,7 @@ class IMDBKit:
                 and year
                 and year == query_year
             ):
-                score += 12.0
+                score += 25.0
 
             seen_ids.add(imdb_id)
 
