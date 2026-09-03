@@ -90,7 +90,7 @@ class RequestCoalescer:
 class IMDBKit:
     """
     Advanced IMDb + TMDB metadata client with comprehensive media filtering,
-    Roman-Hindi/Devanagari text intelligence, TMDB search fallback, sequel tracking, caching, and thread-safe concurrency.
+    Roman-Hindi/Devanagari text intelligence, auto-transliteration, caching, and thread-safe concurrency.
     """
 
     IMDb_SUGGESTION_URL = "https://v3.sg.media-imdb.com/suggestion/x/"
@@ -233,8 +233,51 @@ class IMDBKit:
         return self._coalescer.execute(cache_key, fetch)
 
     # ============================================================
-    # Helpers & Text Intelligence (Roman-Hindi / Devanagari)
+    # Helpers & Text Intelligence (Devanagari Transliteration)
     # ============================================================
+
+    @staticmethod
+    def _devanagari_to_roman(text: str) -> str:
+        """Converts Hindi Devanagari script queries to Roman/English phonetics for IMDb lookup."""
+        if not text:
+            return ""
+        
+        # Mapping for common Hindi characters/words
+        mapping = {
+            "पठान": "pathaan",
+            "स्त्री": "stree",
+            "पद्maवत": "padmaavat",
+            "दृश्यम": "drishyam",
+            "जवान": "jawan",
+            "गदर": "gadar",
+            "एनिमल": "animal",
+            "आरआरआर": "rrr",
+            "दंगल": "dangal",
+            "शोले": "sholay"
+        }
+        
+        # Check direct word matches first
+        words = text.split()
+        converted = []
+        for w in words:
+            if w in mapping:
+                converted.append(mapping[w])
+            else:
+                # Basic fallback transliteration mapping for basic Devanagari letters
+                dev_map = {
+                    'अ': 'a', 'आ': 'aa', 'इ': 'i', 'ई': 'ee', 'उ': 'u', 'ऊ': 'oo', 'ए': 'e', 'ऐ': 'ai', 'ओ': 'o', 'औ': 'au',
+                    'क': 'k', 'ख': 'kh', 'ग': 'g', 'घ': 'gh', 'ङ': 'n',
+                    'च': 'ch', 'छ': 'chh', 'ज': 'j', 'झ': 'jh', 'ञ': 'n',
+                    'ट': 't', 'ठ': 'th', 'ड': 'd', 'ढ': 'dh', 'ण': 'n',
+                    'त': 't', 'थ': 'th', 'द': 'd', 'ध': 'dh', 'न': 'n',
+                    'प': 'p', 'फ': 'f', 'ब': 'b', 'भ': 'bh', 'म': 'm',
+                    'य': 'y', 'र': 'r', 'ल': 'l', 'व': 'v',
+                    'श': 'sh', 'ष': 'sh', 'स': 's', 'ह': 'h',
+                    'ा': 'aa', 'ि': 'i', 'ी': 'ee', 'ु': 'u', 'ू': 'oo', 'े': 'e', 'ै': 'ai', 'ो': 'o', 'ौ': 'au', '्': ''
+                }
+                w_conv = "".join([dev_map.get(char, char) for char in w])
+                converted.append(w_conv)
+        return " ".join(converted)
 
     @staticmethod
     def _normalize_imdb_id(
@@ -338,6 +381,9 @@ class IMDBKit:
         if value is None:
             return ""
 
+        # Auto-transliterate Devanagari to Roman if present
+        value = IMDBKit._devanagari_to_roman(str(value))
+
         value = unicodedata.normalize(
             "NFKC",
             str(value),
@@ -350,7 +396,7 @@ class IMDBKit:
         value = value.replace("’", "")
 
         value = re.sub(
-            r"[^a-z0-9\u0900-\u097F]+",
+            r"[^a-z0-9]+",
             " ",
             value,
         )
@@ -1062,92 +1108,7 @@ class IMDBKit:
         return result
 
     # ============================================================
-    # TMDB Search Fallback for Non-English / Devanagari Scripts
-    # ============================================================
-
-    def _tmdb_search_fallback(
-        self,
-        title: str,
-        results_count: int,
-    ) -> List[Title]:
-        if not self.tmdb_api_key:
-            return []
-
-        url = f"{self.TMDB_BASE_URL}/search/multi"
-        params = {
-            "api_key": self.tmdb_api_key,
-            "query": title,
-            "include_adult": "false",
-        }
-
-        data = self._cached_request_json(url, params, cache_tier="tmdb")
-        if not data or not data.get("results"):
-            return []
-
-        titles = []
-        seen_ids = set()
-
-        for item in data.get("results", []):
-            if not isinstance(item, dict):
-                continue
-
-            media_type = item.get("media_type")
-            if media_type not in ["movie", "tv"]:
-                continue
-
-            tmdb_id = item.get("id")
-            if not tmdb_id:
-                continue
-
-            # Fetch external IDs to get the official IMDb ID (tt...)
-            details_url = f"{self.TMDB_BASE_URL}/{media_type}/{tmdb_id}/external_ids"
-            details_params = {"api_key": self.tmdb_api_key}
-            ext_data = self._cached_request_json(details_url, details_params, cache_tier="tmdb")
-            
-            imdb_id = None
-            if ext_data and isinstance(ext_data, dict):
-                imdb_id = self._normalize_imdb_id(ext_data.get("imdb_id"))
-
-            if not imdb_id:
-                imdb_id = f"tmdb_{tmdb_id}"  # Fallback identifier if IMDb ID missing
-
-            if imdb_id in seen_ids:
-                continue
-
-            item_title = item.get("title") or item.get("name") or ""
-            if not item_title:
-                continue
-
-            release_date = item.get("release_date") or item.get("first_air_date")
-            year = self._year_from_date(release_date)
-
-            raw_kind = "movie" if media_type == "movie" else "tv series"
-            kind = self._normalize_kind(raw_kind)
-
-            if not self._filter_unwanted_kinds(kind):
-                continue
-
-            poster_path = item.get("poster_path")
-            poster_url = f"https://image.tmdb.org/t/p/w1280{poster_path}" if poster_path else None
-
-            seen_ids.add(imdb_id)
-            titles.append(
-                Title(
-                    imdb_id=imdb_id,
-                    title=item_title,
-                    year=year,
-                    kind=kind,
-                    image_url=poster_url,
-                )
-            )
-
-            if len(titles) >= results_count:
-                break
-
-        return titles
-
-    # ============================================================
-    # IMDb Search (with TMDB Fallback)
+    # IMDb Search
     # ============================================================
 
     def search_movie(
@@ -1156,8 +1117,8 @@ class IMDBKit:
         results: int = 10,
     ) -> SearchResult:
         """
-        Search IMDb titles with Devanagari/Roman-Hindi correction, sequel matching,
-        year tracking, TMDB search fallback, and filtering of non-media types.
+        Search IMDb titles with Devanagari auto-transliteration, Roman-Hindi correction,
+        sequel matching, year tracking, and filtering of non-media types.
         """
 
         if not title:
@@ -1289,12 +1250,6 @@ class IMDBKit:
                     result,
                 )
             )
-
-        # If IMDb yields no results or fallback needed for Devanagari/Non-English scripts
-        if not candidates and self.tmdb_api_key:
-            tmdb_fallback_titles = self._tmdb_search_fallback(title, results)
-            if tmdb_fallback_titles:
-                return SearchResult(tmdb_fallback_titles)
 
         candidates.sort(
             key=lambda pair: (
@@ -1796,7 +1751,7 @@ class IMDBKit:
         imdb_url = (
             f"https://www.imdb.com/title/"
             f"{imdb_id}/"
-            if imdb_id and not imdb_id.startswith("tmdb_")
+            if imdb_id
             else None
         )
 
@@ -1808,7 +1763,7 @@ class IMDBKit:
             release_date=release_date,
             year=year,
             plot=plot,
-            imdb_id=imdb_id if imdb_id and not imdb_id.startswith("tmdb_") else None,
+            imdb_id=imdb_id,
             title=title,
             votes=votes,
             title_akas=title_akas,
