@@ -3,6 +3,34 @@ from typing import Any, Dict, List, Optional
 
 
 @dataclass
+class Credit:
+    """
+    Cinemagoer-compatible person/company object.
+
+    Supports:
+        person.name
+        str(person)
+    """
+
+    name: str
+
+    def __str__(self):
+        return self.name
+
+    def __repr__(self):
+        return self.name
+
+    def get(self, key: str, default: Any = None):
+        if key == "name":
+            return self.name
+        return default
+
+    def __getitem__(self, key: str):
+        if key == "name":
+            return self.name
+        raise KeyError(key)
+
+@dataclass
 class Title:
     """
     Lightweight IMDb search result.
@@ -145,6 +173,83 @@ class Movie:
     tagline: Optional[str] = None
     status: Optional[str] = None
     episodes: Optional[int] = None
+        def __post_init__(self):
+        """
+        Normalize credit fields to Cinemagoer-compatible objects.
+
+        The new IMDBKit internally stores credits as strings,
+        while older bot code expects objects with `.name`.
+        """
+
+        credit_fields = (
+            "stars",
+            "directors",
+            "writers",
+            "producers",
+            "composers",
+            "cinematographers",
+            "music_team",
+            "distributors",
+        )
+
+        for field_name in credit_fields:
+            values = getattr(self, field_name, None)
+
+            if not values:
+                setattr(self, field_name, [])
+                continue
+
+            if not isinstance(values, (list, tuple, set)):
+                values = [values]
+
+            normalized = []
+
+            for value in values:
+                if isinstance(value, Credit):
+                    normalized.append(value)
+
+                elif isinstance(value, str):
+                    value = value.strip()
+
+                    if value:
+                        normalized.append(
+                            Credit(name=value)
+                        )
+
+                elif isinstance(value, dict):
+                    name = (
+                        value.get("name")
+                        or value.get("original_name")
+                        or value.get("title")
+                        or ""
+                    )
+
+                    if name:
+                        normalized.append(
+                            Credit(name=str(name).strip())
+                        )
+
+                elif hasattr(value, "name"):
+                    name = getattr(value, "name", None)
+
+                    if name:
+                        normalized.append(
+                            Credit(name=str(name).strip())
+                        )
+
+                else:
+                    text = str(value).strip()
+
+                    if text:
+                        normalized.append(
+                            Credit(name=text)
+                        )
+
+            setattr(
+                self,
+                field_name,
+                normalized,
+                    )
 
     @property
     def movieID(self) -> Optional[str]:
