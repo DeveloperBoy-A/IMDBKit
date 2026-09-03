@@ -846,6 +846,7 @@ class IMDBKit:
             str(value),
         )
 
+        # Remove file extension
         text = re.sub(
             r"\.(mkv|mp4|avi|mov|webm|m4v)$",
             "",
@@ -859,6 +860,36 @@ class IMDBKit:
             text,
         )
 
+        # Remove Season/Episode patterns completely along with their labels
+        text = re.sub(
+            r"\b(?:season|s)\s*\d{1,3}\b",
+            " ",
+            text,
+            flags=re.I,
+        )
+
+        text = re.sub(
+            r"\b(?:episode|ep|e)\s*\d{1,3}\b",
+            " ",
+            text,
+            flags=re.I,
+        )
+
+        text = re.sub(
+            r"\bS\d{1,3}(?:[-_ ]?E\d{1,3})?\b",
+            " ",
+            text,
+            flags=re.I,
+        )
+
+        text = re.sub(
+            r"\b\d{1,2}x\d{1,3}\b",
+            " ",
+            text,
+            flags=re.I,
+        )
+
+        # Remove release/technical metadata
         text = re.sub(
             r"\b(?:"
             r"\d{3,4}p|"
@@ -876,30 +907,8 @@ class IMDBKit:
             r"proper|repack|remastered|"
             r"extended|uncut|"
             r"dual[ -]?audio|multi[ -]?audio|"
-            r"nf|amzn|prime|"
-            r"season|episode"
+            r"nf|amzn|prime"
             r")\b",
-            " ",
-            text,
-            flags=re.I,
-        )
-
-        text = re.sub(
-            r"\bS\d{1,3}(?:[-_ ]?S\d{1,3})?\b",
-            " ",
-            text,
-            flags=re.I,
-        )
-
-        text = re.sub(
-            r"\bS\d{1,3}E\d{1,3}\b",
-            " ",
-            text,
-            flags=re.I,
-        )
-
-        text = re.sub(
-            r"\b\d{1,2}x\d{1,3}\b",
             " ",
             text,
             flags=re.I,
