@@ -90,7 +90,7 @@ class RequestCoalescer:
 class IMDBKit:
     """
     Advanced IMDb + TMDB metadata client with comprehensive media filtering,
-    Roman-Hindi/Devanagari text intelligence, sequel tracking, caching, and thread-safe concurrency.
+    Roman-Hindi/Devanagari text intelligence, TMDB search fallback, sequel tracking, caching, and thread-safe concurrency.
     """
 
     IMDb_SUGGESTION_URL = "https://v3.sg.media-imdb.com/suggestion/x/"
@@ -1061,11 +1061,105 @@ class IMDBKit:
 
         return result
 
+    # ============================================================
+    # TMDB Search Fallback for Non-English / Devanagari Scripts
+    # ============================================================
+
+    def _tmdb_search_fallback(
+        self,
+        title: str,
+        results_count: int,
+    ) -> List[Title]:
+        if not self.tmdb_api_key:
+            return []
+
+        url = f"{self.TMDB_BASE_URL}/search/multi"
+        params = {
+            "api_key": self.tmdb_api_key,
+            "query": title,
+            "include_adult": "false",
+        }
+
+        data = self._cached_request_json(url, params, cache_tier="tmdb")
+        if not data or not data.get("results"):
+            return []
+
+        titles = []
+        seen_ids = set()
+
+        for item in data.get("results", []):
+            if not isinstance(item, dict):
+                continue
+
+            media_type = item.get("media_type")
+            if media_type not in ["movie", "tv"]:
+                continue
+
+            tmdb_id = item.get("id")
+            if not tmdb_id:
+                continue
+
+            # Fetch external IDs to get the official IMDb ID (tt...)
+            details_url = f"{self.TMDB_BASE_URL}/{media_type}/{tmdb_id}/external_ids"
+            details_params = {"api_key": self.tmdb_api_key}
+            ext_data = self._cached_request_json(details_url, details_params, cache_tier="tmdb")
+            
+            imdb_id = None
+            if ext_data and isinstance(ext_data, dict):
+                imdb_id = self._normalize_imdb_id(ext_data.get("imdb_id"))
+
+            if not imdb_id:
+                imdb_id = f"tmdb_{tmdb_id}"  # Fallback identifier if IMDb ID missing
+
+            if imdb_id in seen_ids:
+                continue
+
+            item_title = item.get("title") or item.get("name") or ""
+            if not item_title:
+                continue
+
+            release_date = item.get("release_date") or item.get("first_air_date")
+            year = self._year_from_date(release_date)
+
+            raw_kind = "movie" if media_type == "movie" else "tv series"
+            kind = self._normalize_kind(raw_kind)
+
+            if not self._filter_unwanted_kinds(kind):
+                continue
+
+            poster_path = item.get("poster_path")
+            poster_url = f"https://image.tmdb.org/t/p/w1280{poster_path}" if poster_path else None
+
+            seen_ids.add(imdb_id)
+            titles.append(
+                Title(
+                    imdb_id=imdb_id,
+                    title=item_title,
+                    year=year,
+                    kind=kind,
+                    image_url=poster_url,
+                )
+            )
+
+            if len(titles) >= results_count:
+                break
+
+        return titles
+
+    # ============================================================
+    # IMDb Search (with TMDB Fallback)
+    # ============================================================
+
     def search_movie(
         self,
         title: str,
         results: int = 10,
     ) -> SearchResult:
+        """
+        Search IMDb titles with Devanagari/Roman-Hindi correction, sequel matching,
+        year tracking, TMDB search fallback, and filtering of non-media types.
+        """
+
         if not title:
             return SearchResult([])
 
@@ -1096,14 +1190,7 @@ class IMDBKit:
 
         data = self._cached_request_json(url, cache_tier="imdb")
 
-        if not data:
-            return SearchResult([])
-
-        raw_results = data.get(
-            "d",
-            [],
-        )
-
+        raw_results = data.get("d", []) if data else []
         candidates = []
         seen_ids = set()
 
@@ -1203,6 +1290,12 @@ class IMDBKit:
                 )
             )
 
+        # If IMDb yields no results or fallback needed for Devanagari/Non-English scripts
+        if not candidates and self.tmdb_api_key:
+            tmdb_fallback_titles = self._tmdb_search_fallback(title, results)
+            if tmdb_fallback_titles:
+                return SearchResult(tmdb_fallback_titles)
+
         candidates.sort(
             key=lambda pair: (
                 pair[0],
@@ -1217,6 +1310,10 @@ class IMDBKit:
         ]
 
         return SearchResult(titles)
+
+    # ============================================================
+    # IMDb ID Search
+    # ============================================================
 
     def _find_imdb_title(
         self,
@@ -1277,6 +1374,10 @@ class IMDBKit:
             )
 
         return None
+
+    # ============================================================
+    # TMDB (with Cache & Coalescing)
+    # ============================================================
 
     def _tmdb_find(
         self,
@@ -1340,6 +1441,10 @@ class IMDBKit:
             return res
 
         return self._coalescer.execute(cache_key, fetch)
+
+    # ============================================================
+    # Movie Builder
+    # ============================================================
 
     def _build_movie(
         self,
@@ -1691,7 +1796,7 @@ class IMDBKit:
         imdb_url = (
             f"https://www.imdb.com/title/"
             f"{imdb_id}/"
-            if imdb_id
+            if imdb_id and not imdb_id.startswith("tmdb_")
             else None
         )
 
@@ -1703,7 +1808,7 @@ class IMDBKit:
             release_date=release_date,
             year=year,
             plot=plot,
-            imdb_id=imdb_id,
+            imdb_id=imdb_id if imdb_id and not imdb_id.startswith("tmdb_") else None,
             title=title,
             votes=votes,
             title_akas=title_akas,
@@ -1730,10 +1835,18 @@ class IMDBKit:
             original_title=original_title,
         )
 
+    # ============================================================
+    # Get Movie
+    # ============================================================
+
     def get_movie(
         self,
         movie_id: Any,
     ) -> Movie:
+        """
+        Fetch complete movie/series metadata with preserved existing compatibility.
+        """
+
         imdb_id = self._normalize_imdb_id(
             movie_id
         )
@@ -1794,6 +1907,10 @@ class IMDBKit:
             media_type=media_type,
         )
 
+    # ============================================================
+    # Legacy Compatibility
+    # ============================================================
+
     def update(
         self,
         movie: Movie,
@@ -1802,6 +1919,10 @@ class IMDBKit:
         **kwargs,
     ) -> Movie:
         return movie
+
+    # ============================================================
+    # Convenience
+    # ============================================================
 
     def get_movie_details(
         self,
