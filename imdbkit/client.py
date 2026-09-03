@@ -309,6 +309,19 @@ class IMDBKit:
         query: str,
         item: Title,
     ) -> float:
+        """
+        Advanced title scoring engine.
+
+        Handles:
+        - Exact normalized titles
+        - Typo correction
+        - Character similarity
+        - Token similarity
+        - Partial matches
+        - Word overlap
+        - Short/long title balance
+        """
+
         query_normalized = (
             IMDBKit._normalize_search_text(query)
         )
@@ -322,7 +335,10 @@ class IMDBKit:
         if not query_normalized or not title_normalized:
             return 0.0
 
-        # Perfect normalized match
+        # --------------------------------------------------------
+        # Exact normalized match
+        # --------------------------------------------------------
+
         if query_normalized == title_normalized:
             return 100.0
 
@@ -346,15 +362,19 @@ class IMDBKit:
             title_normalized,
         )
 
-        query_tokens = set(
-            IMDBKit._tokenize_search_text(
-                query_normalized
+        query_tokens = (
+            set(
+                IMDBKit._tokenize_search_text(
+                    query_normalized
+                )
             )
         )
 
-        title_tokens = set(
-            IMDBKit._tokenize_search_text(
-                title_normalized
+        title_tokens = (
+            set(
+                IMDBKit._tokenize_search_text(
+                    title_normalized
+                )
             )
         )
 
@@ -362,19 +382,140 @@ class IMDBKit:
 
         if query_tokens:
             overlap = (
-                len(query_tokens & title_tokens)
+                len(
+                    query_tokens
+                    & title_tokens
+                )
                 / len(query_tokens)
             ) * 100.0
 
-        score = (
-            (ratio * 0.20)
-            + (partial * 0.20)
-            + (token_sort * 0.20)
-            + (token_set * 0.25)
-            + (overlap * 0.15)
+        # --------------------------------------------------------
+        # Length similarity
+        # --------------------------------------------------------
+
+        query_length = len(
+            query_normalized.replace(
+                " ",
+                "",
+            )
         )
 
-        return score
+        title_length = len(
+            title_normalized.replace(
+                " ",
+                "",
+            )
+        )
+
+        length_score = 0.0
+
+        if query_length and title_length:
+            length_difference = abs(
+                query_length
+                - title_length
+            )
+
+            max_length = max(
+                query_length,
+                title_length,
+            )
+
+            length_score = max(
+                0.0,
+                100.0
+                - (
+                    length_difference
+                    / max_length
+                )
+                * 100.0,
+            )
+
+        # --------------------------------------------------------
+        # Final base score
+        # --------------------------------------------------------
+
+        score = (
+            (ratio * 0.28)
+            + (partial * 0.18)
+            + (token_sort * 0.18)
+            + (token_set * 0.18)
+            + (overlap * 0.10)
+            + (length_score * 0.08)
+        )
+
+        # --------------------------------------------------------
+        # Typo correction boost
+        #
+        # Example:
+        # interstelar -> interstellar
+        # avatr -> avatar
+        # oppenhimer -> oppenheimer
+        # --------------------------------------------------------
+
+        if (
+            len(query_normalized) >= 5
+            and len(title_normalized) >= 5
+        ):
+            typo_similarity = fuzz.ratio(
+                query_normalized.replace(
+                    " ",
+                    "",
+                ),
+                title_normalized.replace(
+                    " ",
+                    "",
+                ),
+            )
+
+            length_difference = abs(
+                len(
+                    query_normalized.replace(
+                        " ",
+                        "",
+                    )
+                )
+                - len(
+                    title_normalized.replace(
+                        " ",
+                        "",
+                    )
+                )
+            )
+
+            # Very close spelling but not identical.
+            if (
+                typo_similarity >= 90
+                and length_difference <= 3
+            ):
+                score += 28.0
+
+            elif (
+                typo_similarity >= 85
+                and length_difference <= 2
+            ):
+                score += 18.0
+
+        # --------------------------------------------------------
+        # Single-word typo protection
+        # --------------------------------------------------------
+
+        if (
+            len(query_tokens) == 1
+            and len(title_tokens) == 1
+            and query_normalized != title_normalized
+        ):
+            single_word_ratio = fuzz.ratio(
+                query_normalized,
+                title_normalized,
+            )
+
+            if single_word_ratio >= 90:
+                score += 12.0
+
+        return min(
+            score,
+            150.0,
+        )
 
     @staticmethod
     def _is_good_search_match(
@@ -382,6 +523,11 @@ class IMDBKit:
         item: Title,
         score: float,
     ) -> bool:
+        """
+        Decide whether an IMDb result is actually relevant
+        to the user's search.
+        """
+
         query_normalized = (
             IMDBKit._normalize_search_text(query)
         )
@@ -392,9 +538,13 @@ class IMDBKit:
             )
         )
 
-        if not query_normalized or not title_normalized:
+        if (
+            not query_normalized
+            or not title_normalized
+        ):
             return False
 
+        # Exact title is always valid.
         if query_normalized == title_normalized:
             return True
 
@@ -412,14 +562,49 @@ class IMDBKit:
 
         if query_tokens:
             overlap = (
-                len(query_tokens & title_tokens)
+                len(
+                    query_tokens
+                    & title_tokens
+                )
                 / len(query_tokens)
             )
 
-            if overlap >= 0.5 and score >= 50:
+            if (
+                overlap >= 0.50
+                and score >= 45
+            ):
                 return True
 
-        return score >= 65
+        # Strong typo match.
+        compact_query = (
+            query_normalized.replace(
+                " ",
+                "",
+            )
+        )
+
+        compact_title = (
+            title_normalized.replace(
+                " ",
+                "",
+            )
+        )
+
+        typo_ratio = fuzz.ratio(
+            compact_query,
+            compact_title,
+        )
+
+        if (
+            typo_ratio >= 85
+            and abs(
+                len(compact_query)
+                - len(compact_title)
+            ) <= 3
+        ):
+            return True
+
+        return score >= 62
 
     # ============================================================
     # Smart Media Title Parser
@@ -824,17 +1009,6 @@ class IMDBKit:
                 and year == query_year
             ):
                 score += 12.0
-
-            # Small preference for exact title.
-            if (
-                self._normalize_search_text(
-                    title
-                )
-                == self._normalize_search_text(
-                    item_title
-                )
-            ):
-                score += 20.0
 
             seen_ids.add(imdb_id)
 
