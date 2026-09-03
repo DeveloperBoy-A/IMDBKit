@@ -15,7 +15,9 @@ authors = [
     {name = "DeveloperBoy-A"}
 ]
 
-dependencies = []
+dependencies = [
+    "rapidfuzz>=3.0.0",
+]
 
 
 [tool.setuptools]
