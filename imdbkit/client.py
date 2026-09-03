@@ -848,11 +848,13 @@ class IMDBKit:
         if not value:
             return ""
 
+        # Auto-convert Devanagari script to Roman/English phonetics first
+        text = IMDBKit._devanagari_to_roman(str(value))
+
         text = unicodedata.normalize(
             "NFKC",
-            str(value),
+            text,
         )
-
         # Remove file extension
         text = re.sub(
             r"\.(mkv|mp4|avi|mov|webm|m4v)$",
