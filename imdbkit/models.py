@@ -168,17 +168,20 @@ class Movie:
     cover_url: Optional[str] = None
     url: Optional[str] = None
 
-    # Additional useful fields.
     original_title: Optional[str] = None
     tagline: Optional[str] = None
     status: Optional[str] = None
     episodes: Optional[int] = None
-        def __post_init__(self):
+
+    def __post_init__(self):
         """
         Normalize credit fields to Cinemagoer-compatible objects.
 
-        The new IMDBKit internally stores credits as strings,
-        while older bot code expects objects with `.name`.
+        This keeps compatibility with older bot code that expects:
+
+            person.name
+
+        while IMDBKit internally may receive plain strings.
         """
 
         credit_fields = (
@@ -249,11 +252,12 @@ class Movie:
                 self,
                 field_name,
                 normalized,
-                    )
+            )
 
     @property
     def movieID(self) -> Optional[str]:
         """Legacy Cinemagoer-compatible numeric IMDb ID."""
+
         if not self.imdb_id:
             return None
 
@@ -266,7 +270,6 @@ class Movie:
     @property
     def poster_url(self) -> Optional[str]:
         return self.cover_url
-
 
     def get(self, key: str, default: Any = None) -> Any:
         """
