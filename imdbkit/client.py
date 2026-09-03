@@ -310,16 +310,19 @@ class IMDBKit:
         item: Title,
     ) -> float:
         """
-        Advanced title scoring engine.
+        Advanced title relevance scoring.
 
         Handles:
-        - Exact normalized titles
-        - Typo correction
-        - Character similarity
-        - Token similarity
-        - Partial matches
-        - Word overlap
-        - Short/long title balance
+        - Exact title matching
+        - Spelling mistakes
+        - Missing/extra letters
+        - Joined/separated words
+        - Token matching
+        - Prefix/phrase matching
+        - Sequel numbers
+        - Movie/TV relevance
+        - Future/upcoming titles
+        - Short/video/game/podcast suppression
         """
 
         query_normalized = (
@@ -335,16 +338,33 @@ class IMDBKit:
         if not query_normalized or not title_normalized:
             return 0.0
 
-        # --------------------------------------------------------
-        # Exact normalized match
-        # --------------------------------------------------------
+        query_compact = query_normalized.replace(" ", "")
+        title_compact = title_normalized.replace(" ", "")
 
-        if query_normalized == title_normalized:
-            return 100.0
+        query_tokens = set(
+            IMDBKit._tokenize_search_text(
+                query_normalized
+            )
+        )
+
+        title_tokens = set(
+            IMDBKit._tokenize_search_text(
+                title_normalized
+            )
+        )
+
+        # --------------------------------------------------
+        # BASIC FUZZY SCORES
+        # --------------------------------------------------
 
         ratio = fuzz.ratio(
             query_normalized,
             title_normalized,
+        )
+
+        compact_ratio = fuzz.ratio(
+            query_compact,
+            title_compact,
         )
 
         partial = fuzz.partial_ratio(
@@ -362,161 +382,287 @@ class IMDBKit:
             title_normalized,
         )
 
-        query_tokens = (
-            set(
-                IMDBKit._tokenize_search_text(
-                    query_normalized
-                )
-            )
-        )
-
-        title_tokens = (
-            set(
-                IMDBKit._tokenize_search_text(
-                    title_normalized
-                )
-            )
-        )
+        # --------------------------------------------------
+        # TOKEN OVERLAP
+        # --------------------------------------------------
 
         overlap = 0.0
 
         if query_tokens:
             overlap = (
-                len(
-                    query_tokens
-                    & title_tokens
-                )
+                len(query_tokens & title_tokens)
                 / len(query_tokens)
             ) * 100.0
 
-        # --------------------------------------------------------
-        # Length similarity
-        # --------------------------------------------------------
-
-        query_length = len(
-            query_normalized.replace(
-                " ",
-                "",
-            )
-        )
-
-        title_length = len(
-            title_normalized.replace(
-                " ",
-                "",
-            )
-        )
+        # --------------------------------------------------
+        # LENGTH SIMILARITY
+        # --------------------------------------------------
 
         length_score = 0.0
 
-        if query_length and title_length:
-            length_difference = abs(
-                query_length
-                - title_length
-            )
-
+        if query_compact and title_compact:
             max_length = max(
-                query_length,
-                title_length,
+                len(query_compact),
+                len(title_compact),
             )
 
-            length_score = max(
-                0.0,
-                100.0
-                - (
-                    length_difference
-                    / max_length
+            difference = abs(
+                len(query_compact)
+                - len(title_compact)
+            )
+
+            if max_length:
+                length_score = max(
+                    0.0,
+                    100.0
+                    - (
+                        difference
+                        / max_length
+                    )
+                    * 100.0,
                 )
-                * 100.0,
-            )
 
-        # --------------------------------------------------------
-        # Final base score
-        # --------------------------------------------------------
+        # --------------------------------------------------
+        # BASE SCORE
+        # --------------------------------------------------
 
         score = (
-            (ratio * 0.28)
-            + (partial * 0.18)
-            + (token_sort * 0.18)
-            + (token_set * 0.18)
-            + (overlap * 0.10)
-            + (length_score * 0.08)
+            (ratio * 0.23)
+            + (compact_ratio * 0.22)
+            + (partial * 0.12)
+            + (token_sort * 0.15)
+            + (token_set * 0.14)
+            + (overlap * 0.08)
+            + (length_score * 0.06)
         )
 
-        # --------------------------------------------------------
-        # Typo correction boost
-        #
+        # --------------------------------------------------
+        # EXACT MATCH
+        # --------------------------------------------------
+
+        if query_normalized == title_normalized:
+            score += 45.0
+
+        if query_compact == title_compact:
+            score += 25.0
+
+        # --------------------------------------------------
+        # PREFIX / PHRASE MATCH
+        # --------------------------------------------------
+
+        if (
+            len(query_normalized) >= 4
+            and title_normalized.startswith(
+                query_normalized
+            )
+        ):
+            score += 28.0
+
+        if (
+            len(query_compact) >= 4
+            and title_compact.startswith(
+                query_compact
+            )
+        ):
+            score += 18.0
+
         # Example:
-        # interstelar -> interstellar
-        # avatr -> avatar
-        # oppenhimer -> oppenheimer
-        # --------------------------------------------------------
+        # "the vvaan"
+        # ->
+        # "the vvaan force of the forrest"
 
         if (
-            len(query_normalized) >= 5
-            and len(title_normalized) >= 5
+            query_tokens
+            and query_tokens.issubset(title_tokens)
         ):
-            typo_similarity = fuzz.ratio(
-                query_normalized.replace(
-                    " ",
-                    "",
-                ),
-                title_normalized.replace(
-                    " ",
-                    "",
-                ),
-            )
+            score += 22.0
 
-            length_difference = abs(
-                len(
-                    query_normalized.replace(
-                        " ",
-                        "",
-                    )
-                )
-                - len(
-                    title_normalized.replace(
-                        " ",
-                        "",
-                    )
-                )
-            )
+        # --------------------------------------------------
+        # NUMERIC / SEQUEL MATCH
+        # --------------------------------------------------
 
-            # Very close spelling but not identical.
-            if (
-                typo_similarity >= 90
-                and length_difference <= 3
-            ):
-                score += 28.0
-
-            elif (
-                typo_similarity >= 85
-                and length_difference <= 2
-            ):
-                score += 18.0
-
-        # --------------------------------------------------------
-        # Single-word typo protection
-        # --------------------------------------------------------
-
-        if (
-            len(query_tokens) == 1
-            and len(title_tokens) == 1
-            and query_normalized != title_normalized
-        ):
-            single_word_ratio = fuzz.ratio(
+        query_numbers = set(
+            re.findall(
+                r"\b\d+\b",
                 query_normalized,
+            )
+        )
+
+        title_numbers = set(
+            re.findall(
+                r"\b\d+\b",
                 title_normalized,
             )
+        )
 
-            if single_word_ratio >= 90:
+        if query_numbers:
+            if query_numbers.issubset(title_numbers):
+                score += 40.0
+            else:
+                score -= 18.0
+
+        # Example:
+        # "sardar 2"
+        # must prefer "Sardar 2"
+        # over "Sardar"
+
+        if (
+            query_numbers
+            and not title_numbers
+        ):
+            score -= 30.0
+
+        # --------------------------------------------------
+        # BASE TITLE MATCH
+        # --------------------------------------------------
+
+        query_without_numbers = re.sub(
+            r"\b\d+\b",
+            "",
+            query_normalized,
+        ).strip()
+
+        title_without_numbers = re.sub(
+            r"\b\d+\b",
+            "",
+            title_normalized,
+        ).strip()
+
+        if (
+            query_without_numbers
+            and title_without_numbers
+        ):
+            base_ratio = fuzz.ratio(
+                query_without_numbers,
+                title_without_numbers,
+            )
+
+            if base_ratio >= 92:
+                score += 18.0
+            elif base_ratio >= 85:
+                score += 10.0
+
+        # --------------------------------------------------
+        # MEDIA TYPE RELEVANCE
+        # --------------------------------------------------
+
+        kind = (
+            str(item.kind or "")
+            .strip()
+            .lower()
+        )
+
+        movie_types = {
+            "movie",
+            "feature",
+            "film",
+        }
+
+        series_types = {
+            "tv series",
+            "tv-series",
+            "series",
+            "tv mini-series",
+            "tv miniseries",
+            "tv limited series",
+            "tvseries",
+        }
+
+        low_priority_types = {
+            "short",
+            "video",
+            "video game",
+            "videogame",
+            "podcast",
+            "podcastseries",
+            "tv short",
+            "tv movie",
+            "tvmovie",
+        }
+
+        # Default preference for actual movies/series.
+        if kind in movie_types:
+            score += 12.0
+
+        elif kind in series_types:
+            score += 10.0
+
+        elif kind in low_priority_types:
+            score -= 22.0
+
+        # --------------------------------------------------
+        # TITLE TYPE WORDS
+        # --------------------------------------------------
+
+        query_has_series_hint = any(
+            word in query_tokens
+            for word in {
+                "series",
+                "season",
+                "episode",
+                "tv",
+            }
+        )
+
+        if query_has_series_hint:
+            if kind in series_types:
+                score += 20.0
+            elif kind in movie_types:
+                score -= 8.0
+
+        # --------------------------------------------------
+        # FUTURE / UPCOMING TITLE SUPPORT
+        # --------------------------------------------------
+
+        # Do NOT punish future titles.
+        # They remain fully eligible for ranking.
+
+        if item.year:
+            try:
+                current_year = 2026
+
+                if item.year >= current_year:
+                    score += 3.0
+
+            except Exception:
+                pass
+
+        # --------------------------------------------------
+        # VERY STRONG CLOSE MATCH
+        # --------------------------------------------------
+
+        if (
+            len(query_compact) >= 5
+            and len(title_compact) >= 5
+        ):
+            compact_difference = abs(
+                len(query_compact)
+                - len(title_compact)
+            )
+
+            if (
+                compact_ratio >= 92
+                and compact_difference <= 3
+            ):
+                score += 30.0
+
+            elif (
+                compact_ratio >= 88
+                and compact_difference <= 3
+            ):
+                score += 22.0
+
+            elif (
+                compact_ratio >= 84
+                and compact_difference <= 2
+            ):
                 score += 12.0
 
         return min(
-            score,
-            150.0,
+            max(score, 0.0),
+            180.0,
         )
-
+                    
     @staticmethod
     def _is_good_search_match(
         query: str,
