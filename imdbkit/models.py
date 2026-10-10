@@ -98,6 +98,7 @@ class Title:
     backdrop_url: Optional[str] = None
     overview: Optional[str] = None
     score: float = 0.0                      # relevance score of the last search
+    platform: Optional[str] = None          # e.g. "Netflix" (when known)
 
     @property
     def movieID(self) -> str:
@@ -140,6 +141,8 @@ class Title:
             text += f" ({self.year_text})"
         if self.kind:
             text += f" • {self.kind}"
+        if self.platform:
+            text += f" • {self.platform}"
         if self.is_upcoming:
             text += " • Upcoming"
         return text
@@ -164,6 +167,7 @@ class Title:
             "overview": self.overview,
             "status": self.status,
             "label": self.label,
+            "platform": self.platform,
         }
 
         return mapping.get(key, default)
@@ -206,6 +210,7 @@ class Title:
             "is_upcoming": self.is_upcoming,
             "label": self.label,
             "tmdb_id": self.tmdb_id,
+            "platform": self.platform,
         }
 
 
@@ -426,6 +431,9 @@ class Movie:
     number_of_seasons: Optional[int] = None
     next_episode: Optional[Episode] = None
     last_episode: Optional[Episode] = None
+
+    streaming_on: List[str] = field(default_factory=list)   # e.g. ["Netflix", "MX Player"]
+    streaming_region: Optional[str] = None                   # region of streaming_on, e.g. "IN"
 
     series_title: Optional[str] = None      # set when the object describes an episode
     season_info: Optional[Season] = None    # set by IMDBKit.lookup("show S02")
@@ -686,6 +694,8 @@ class Movie:
             "number_of_seasons": self.number_of_seasons,
             "creators": self.creators,
             "networks": self.networks,
+            "streaming_on": self.streaming_on,
+            "streaming_region": self.streaming_region,
             "tmdb_id": self.tmdb_id,
             "media_type": self.media_type,
             "original_language": self.original_language,
