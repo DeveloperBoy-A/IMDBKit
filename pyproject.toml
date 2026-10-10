@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "imdbkit"
-version = "1.0.0"
+version = "1.1.0"
 description = "Lightweight IMDb and TMDB metadata library for Python bots"
 readme = "README.md"
 requires-python = ">=3.8"
