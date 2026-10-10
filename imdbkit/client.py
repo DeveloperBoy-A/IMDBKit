@@ -127,6 +127,8 @@ class IMDBKit:
     IMDb_SUGGESTION_URL = "https://v3.sg.media-imdb.com/suggestion/"
     IMDb_TITLE_URL = "https://www.imdb.com/title/"
     TMDB_BASE_URL = "https://api.themoviedb.org/3"
+    WIKI_API_URL = "https://en.wikipedia.org/w/api.php"
+    TVMAZE_URL = "https://api.tvmaze.com"
     TMDB_IMAGE_URL = "https://image.tmdb.org/t/p/"
 
     # NOTE: w1280 is a *backdrop* size.  TMDB poster sizes are
@@ -154,6 +156,9 @@ class IMDBKit:
         ai_corrector: Optional[Callable[[str], Any]] = None,
         imdb_page_fallback: bool = True,
         max_workers: int = 6,
+        region: str = "IN",
+        use_wikipedia: bool = True,
+        use_tvmaze: bool = True,
     ):
         """
         tmdb_api_key       TMDB v3 key *or* v4 read-access token (also read from
@@ -162,6 +167,11 @@ class IMDBKit:
         ai_corrector       Optional callable(query) -> str | list[str].  Plug any LLM
                            here; it is only called when local spell-correction
                            could not find a good match.
+        region             Country code for "streaming_on" (Netflix, JioHotstar, MX Player ...).
+        use_wikipedia      Spell rescue through Wikipedia's search suggestions.  Knows
+                           Hollywood, Bollywood, Korean and OTT-original titles even when
+                           the typo is too big for IMDb's prefix search.
+        use_tvmaze         Extra series source (Netflix / Prime / Hotstar / MX Player shows).
         imdb_page_fallback Read rating / plot / runtime from the public IMDb title
                            page (JSON-LD) - gives real IMDb rating and works even
                            without a TMDB key.
@@ -179,6 +189,9 @@ class IMDBKit:
         self.ai_corrector = ai_corrector
         self.imdb_page_fallback = imdb_page_fallback
         self.max_workers = max(1, int(max_workers))
+        self.region = (region or "IN").upper()
+        self.use_wikipedia = use_wikipedia
+        self.use_tvmaze = use_tvmaze
 
         # v4 "API Read Access Token" is a JWT, v3 key is 32 hex chars.
         self._tmdb_bearer = bool(
@@ -649,10 +662,29 @@ class IMDBKit:
         top_score, top_base = scored[0][0], scored[0][1]
         min_base = 70.0 if top_base >= 95 else 58.0
 
-        return [
+        kept = [
             row for row in scored
             if row[1] >= min_base and row[0] >= top_score - 40.0
         ]
+
+        # ---- franchise / sibling titles ----
+        # "Dhurandhar" and "Dhurandhar: The Revenge" should both be offered, whichever
+        # one the user typed.  Titles that start with the best hit (or that the best
+        # hit starts with) are kept right behind it.
+        if top_base >= 80:
+            anchor = strip_article(normalize_text(scored[0][2].title)).replace(" ", "")
+            kept_ids = {id(row[2]) for row in kept}
+            if len(anchor) >= 4:
+                for score, base, item in scored[1:]:
+                    if id(item) in kept_ids:
+                        continue
+                    form = strip_article(normalize_text(item.title)).replace(" ", "")
+                    related = form.startswith(anchor) or (len(form) >= 5 and anchor.startswith(form))
+                    if related and item.kind in ALLOWED_KINDS:
+                        kept.append((max(score, top_score - 12.0), base, item))
+                kept.sort(key=lambda row: (row[0], row[2].year or 0), reverse=True)
+
+        return kept
 
     # ============================================================
     # IMDb suggestion API
@@ -808,10 +840,13 @@ class IMDBKit:
 
             def resolve(entry):
                 _, _, media_type, draft = entry
-                imdb_id = self._tmdb_external_imdb_id(media_type, draft.tmdb_id)
-                if not imdb_id:
-                    return None
-                draft.imdb_id = imdb_id
+                # Titles TMDB knows but that have no IMDb page yet (new / regional OTT
+                # releases) are still returned, with id "tmdb:tv:123" / "tmdb:movie:123".
+                # get_movie(), get_season() ... accept that id.
+                draft.imdb_id = (
+                    self._tmdb_external_imdb_id(media_type, draft.tmdb_id)
+                    or f"tmdb:{media_type}:{draft.tmdb_id}"
+                )
                 return draft
 
             return [t for t in self._pmap(resolve, drafts, 4) if t]
@@ -819,6 +854,105 @@ class IMDBKit:
         except Exception as exc:
             logger.exception("IMDBKit TMDB search failed: %s", exc)
             return []
+
+    # ============================================================
+    # Extra sources: Wikipedia (spelling) + TVMaze (OTT series)
+    # ============================================================
+
+    _WIKI_NOT_MEDIA = re.compile(r"\(([^)]*)\)\s*$")
+    _WIKI_MEDIA_HINT = re.compile(r"film|series|miniseries|tv|drama|show|anime|serial|web|season", re.I)
+
+    def _wiki_corrections(self, query: str) -> List[str]:
+        """
+        Wikipedia knows almost every film / series name, in every language and from
+        every platform, and its search is typo tolerant.  We only use it to learn the
+        *correct spelling*; the real data still comes from IMDb / TMDB.
+        """
+        query = (query or "").strip()
+        if not self.use_wikipedia or len(query) < 3:
+            return []
+        try:
+            data = self._cached_request_json(
+                self.WIKI_API_URL,
+                {
+                    "action": "query", "list": "search", "srsearch": query,
+                    "srnamespace": 0, "srlimit": 5, "srinfo": "suggestion",
+                    "srprop": "", "format": "json", "utf8": 1,
+                },
+            )
+            block = (data or {}).get("query", {}) if isinstance(data, dict) else {}
+            names: List[str] = []
+
+            suggestion = (block.get("searchinfo") or {}).get("suggestion")
+            if suggestion:
+                names.append(suggestion)
+
+            for row in block.get("search", [])[:5]:
+                title = row.get("title") or ""
+                note = self._WIKI_NOT_MEDIA.search(title)
+                if note and not self._WIKI_MEDIA_HINT.search(note.group(1)):
+                    continue      # "(politician)", "(surname)" ...
+                title = self._WIKI_NOT_MEDIA.sub("", title).strip()
+                if title:
+                    names.append(title)
+
+            return self._dedupe(normalize_text(n) for n in names)[:4]
+        except Exception as exc:
+            logger.warning("IMDBKit Wikipedia lookup failed: %s", exc)
+            return []
+
+    _TVMAZE_SKIP_TYPES = {"talk show", "news", "sports", "variety", "panel show", "award show"}
+
+    def _tvmaze_titles(self, query: str) -> List[Title]:
+        if not self.use_tvmaze or not query:
+            return []
+        try:
+            rows = self._cached_request_json(f"{self.TVMAZE_URL}/search/shows", {"q": query})
+            titles: List[Title] = []
+            for row in rows if isinstance(rows, list) else []:
+                show = row.get("show") if isinstance(row, dict) else None
+                if not isinstance(show, dict):
+                    continue
+                if str(show.get("type") or "").lower() in self._TVMAZE_SKIP_TYPES:
+                    continue
+                imdb_id = (show.get("externals") or {}).get("imdb")
+                name = self._clean_text(show.get("name"))
+                if not imdb_id or not name:
+                    continue
+                channel = show.get("webChannel") or show.get("network") or {}
+                image = show.get("image") or {}
+                titles.append(
+                    Title(
+                        imdb_id=self._normalize_imdb_id(imdb_id),
+                        title=name,
+                        year=self._year_from_date(show.get("premiered")),
+                        kind="Web Series",
+                        image_url=image.get("original") or image.get("medium"),
+                        end_year=self._year_from_date(show.get("ended")),
+                        release_date=show.get("premiered") or None,
+                        platform=self._clean_text(channel.get("name")),
+                    )
+                )
+            return titles
+        except Exception as exc:
+            logger.warning("IMDBKit TVMaze lookup failed: %s", exc)
+            return []
+
+    @classmethod
+    def add_titles(cls, titles: Iterable[str]) -> None:
+        """
+        Teach the spell checker your own catalogue (e.g. the titles you scraped from
+        MX Player / JioHotstar).  Misspellings of these titles are then corrected too.
+        """
+        cls._vocab.add_many(titles)
+
+    @classmethod
+    def save_vocabulary(cls, path: str) -> None:
+        cls._vocab.save(path)
+
+    @classmethod
+    def load_vocabulary(cls, path: str) -> None:
+        cls._vocab.load(path)
 
     # ============================================================
     # Spell rescue
@@ -832,6 +966,9 @@ class IMDBKit:
         if main:
             for title in self._vocab.correct(main, limit=3):
                 corrections.append(normalize_text(title))
+
+        if main:
+            corrections.extend(self._wiki_corrections(parsed.get("title") or main))
 
         if self.ai_corrector:
             try:
@@ -884,6 +1021,7 @@ class IMDBKit:
                 for attr in (
                     "year", "kind", "image_url", "end_year", "cast_text", "rank",
                     "popularity", "release_date", "tmdb_id", "backdrop_url", "overview",
+                    "platform",
                 ):
                     if getattr(current, attr) in (None, "") and getattr(item, attr) not in (None, ""):
                         setattr(current, attr, getattr(item, attr))
@@ -958,6 +1096,11 @@ class IMDBKit:
                         candidates,
                         self._pmap(self._imdb_suggest_titles, retrieval, self.max_workers),
                     )
+
+            if weak and self.use_tvmaze and kind_filter != {"Movie", "TV Movie"}:
+                main_q = normalize_text(parsed["title"]) or normalize_text(parsed["title_loose"])
+                tv_queries = self._dedupe([main_q] + corrections[:2])
+                self._merge(candidates, self._pmap(self._tvmaze_titles, tv_queries, self.max_workers))
 
             if tmdb_future is not None:
                 try:
@@ -1151,9 +1294,9 @@ class IMDBKit:
         lang2 = self.language.split("-")[0]
         languages = ",".join(self._dedupe([lang2, "en", "hi", "null"]))
         append = (
-            "credits,external_ids,alternative_titles,images,videos,release_dates"
+            "credits,external_ids,alternative_titles,images,videos,release_dates,watch/providers"
             if media_type == "movie"
-            else "credits,external_ids,alternative_titles,images,videos,content_ratings"
+            else "credits,external_ids,alternative_titles,images,videos,content_ratings,watch/providers"
         )
 
         data = self._tmdb_get(
@@ -1463,6 +1606,14 @@ class IMDBKit:
                     }
                 )
 
+        providers = (((data.get("watch/providers") or {}).get("results") or {}).get(self.region) or {})
+        streaming_on = self._dedupe(
+            p.get("provider_name")
+            for group in ("flatrate", "free", "ads")
+            for p in providers.get(group, []) or []
+            if isinstance(p, dict)
+        )
+
         box_office = None
         if media_type == "movie":
             box_office = data.get("revenue") or None
@@ -1519,6 +1670,8 @@ class IMDBKit:
                 c.get("name") for c in data.get("production_companies") or [] if isinstance(c, dict)
             ),
             cast_detail=cast_detail,
+            streaming_on=streaming_on,
+            streaming_region=self.region if streaming_on else None,
             number_of_seasons=self._safe_int(data.get("number_of_seasons")),
             next_episode=self._episode_from_tmdb(data.get("next_episode_to_air")),
             last_episode=self._episode_from_tmdb(data.get("last_episode_to_air")),
@@ -1536,6 +1689,25 @@ class IMDBKit:
             logger.warning("IMDBKit background lookup failed: %s", exc)
             return default
 
+    @staticmethod
+    def _parse_tmdb_id(value: Any) -> Optional[Tuple[str, int]]:
+        """'tmdb:tv:123' -> ('tv', 123)"""
+        match = re.match(r"^tmdb:(movie|tv):(\d+)$", str(value or "").strip())
+        return (match.group(1), int(match.group(2))) if match else None
+
+    def _get_movie_from_tmdb(self, media_type: str, tmdb_id: int) -> Movie:
+        data = self._tmdb_details(media_type, tmdb_id)
+        if not data:
+            return Movie()
+
+        imdb_id = (data.get("external_ids") or {}).get("imdb_id")
+        if imdb_id:                       # IMDb page appeared in the meantime
+            return self.get_movie(imdb_id)
+
+        movie = self._build_movie(f"tmdb:{media_type}:{tmdb_id}", None, data, media_type, {})
+        movie.url = f"https://www.themoviedb.org/{media_type}/{tmdb_id}"
+        return movie
+
     def get_movie(self, movie_id: Any) -> Movie:
         """
         Fetch complete movie/series metadata (IMDb id or numeric id).
@@ -1543,6 +1715,10 @@ class IMDBKit:
         For an *episode* IMDb id the returned object describes the series and has
         .episode_info filled (kind == "Episode").
         """
+        tmdb_ref = self._parse_tmdb_id(movie_id)
+        if tmdb_ref:
+            return self._get_movie_from_tmdb(*tmdb_ref)
+
         imdb_id = self._normalize_imdb_id(movie_id)
 
         if not imdb_id:
@@ -1599,6 +1775,10 @@ class IMDBKit:
             movie_id = movie_id.imdb_id
         elif isinstance(movie_id, Title):
             movie_id = movie_id.imdb_id
+
+        tmdb_ref = self._parse_tmdb_id(movie_id)
+        if tmdb_ref:
+            return tmdb_ref[1] if tmdb_ref[0] == "tv" else None
 
         imdb_id = self._normalize_imdb_id(movie_id)
         if not imdb_id:
