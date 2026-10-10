@@ -65,6 +65,17 @@ def fix(query):            # call any LLM here; return corrected title(s)
     return "Avengers"
 imdb = IMDBKit(tmdb_api_key=KEY, ai_corrector=fix)   # only called if local correction fails
 
+Titles from Netflix / JioHotstar / MX Player / Korean dramas etc.
+
+- Wikipedia is used as a typo-tolerant name dictionary (IMDBKit(use_wikipedia=True)).
+- TVMaze adds OTT series with the platform (title.platform == "MX Player").
+- Titles that exist only on TMDB get the id "tmdb:tv:123" / "tmdb:movie:123"; get_movie() and
+  get_season() accept it.
+- movie.streaming_on -> ["Netflix", "JioHotstar"] for IMDBKit(region="IN").
+- Teach your own catalogue:  IMDBKit.add_titles(["Title 1", "Title 2"])
+  and keep it across restarts:  IMDBKit.save_vocabulary("vocab.json") / IMDBKit.load_vocabulary("vocab.json")
+- Franchise titles are shown together: "Dhurandhar" and "Dhurandhar: The Revenge".
+
 Compatibility
 
 Existing code keeps working: search_movie(), get_movie(), result.titles, title.movieID,
