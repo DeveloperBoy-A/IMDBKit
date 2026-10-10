@@ -19,6 +19,7 @@ from .textutils import normalize_text, phonetic_key, strip_article
 
 SEED_TITLES = (
     # --- Bollywood ---
+    "Dhurandhar", "Dhurandhar: The Revenge",
     "Pathaan", "Jawan", "Animal", "Dunki", "Tiger 3", "Fighter", "Stree", "Stree 2",
     "Bhool Bhulaiyaa", "Bhool Bhulaiyaa 2", "Bhool Bhulaiyaa 3", "Singham Again",
     "Singham", "Simmba", "Sooryavanshi", "Dangal", "3 Idiots", "PK", "Sholay",
@@ -110,6 +111,15 @@ SEED_TITLES = (
     "Mirzapur", "Dark Matter", "Alice in Borderland", "Kingdom", "Sweet Home", "All of Us Are Dead",
     "Cobra Kai", "Outer Banks", "Money Heist: Korea - Joint Economic Area", "Vincenzo",
     "Crash Landing on You", "Hospital Playlist", "The Glory", "Moving",
+    # --- Korean / Asian ---
+    "Business Proposal", "Extraordinary Attorney Woo", "Goblin", "Descendants of the Sun",
+    "My Name", "Hellbound", "Physical: 100", "Itaewon Class", "True Beauty",
+    "Train to Busan", "Reply 1988", "It's Okay to Not Be Okay", "Hometown Cha-Cha-Cha",
+    "Our Beloved Summer", "Squid Game: The Challenge", "Bloodhounds", "Weak Hero Class 1",
+    "Love Next Door", "When the Phone Rings", "Queen of Tears", "Lovely Runner",
+    "My Demon", "The Uncanny Counter", "Tomorrow", "Sweet Home", "Parasyte: The Grey",
+    "Memories of the Alhambra", "Strong Girl Bong-soon", "What's Wrong with Secretary Kim",
+    "Boys Over Flowers", "Coffee Prince", "Healer", "W", "Signal", "Mr. Sunshine",
     # --- Series (Indian) ---
     "Panchayat", "The Family Man", "Sacred Games", "Scam 1992: The Harshad Mehta Story",
     "Paatal Lok", "Asur", "Delhi Crime", "Kota Factory", "TVF Aspirants", "Gullak",
@@ -155,6 +165,21 @@ class TitleVocabulary:
                     return
                 self._by_key[key] = title
                 self._keys.append(key)
+
+    def titles(self) -> List[str]:
+        with self._lock:
+            return list(self._by_key.values())
+
+    def save(self, path: str) -> None:
+        """Persist the vocabulary (seed + learned titles) as JSON."""
+        import json
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(self.titles(), handle, ensure_ascii=False)
+
+    def load(self, path: str) -> None:
+        import json
+        with open(path, "r", encoding="utf-8") as handle:
+            self.add_many(json.load(handle))
 
     def correct(self, query: str, limit: int = 3, cutoff: float = 80.0) -> List[str]:
         """Closest known titles for a (possibly misspelled) query."""
