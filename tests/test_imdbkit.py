@@ -54,6 +54,9 @@ IMDB_DB = [
     item("tt6468322", "Money Heist", "tvSeries", "TV series", 2017, 60, yr="2017-2021"),
     item("tt9990001", "Zorblax Returns", "movie", "feature", NEXT_YEAR, 9000),
     item("tt9990002", "Zorblax", "movie", "feature", 1999, 90000),
+    item("tt30000001", "Dhurandhar", "movie", "feature", 2025, 80),
+    item("tt30000002", "Dhurandhar: The Revenge", "movie", "feature", 2026, 95),
+    item("tt30000003", "Moonlit Hanbok", "tvSeries", "TV series", 2024, 1500, yr="2024-"),
     item("tt0903747", "Breaking Bad", "tvSeries", "TV series", 2008, 20, yr="2008-2013"),
 ]
 
@@ -125,6 +128,9 @@ TMDB_MOVIE = {
         {"site": "YouTube", "key": "TEASER1", "type": "Teaser", "official": True},
         {"site": "YouTube", "key": "TRAILER1", "type": "Trailer", "official": True},
     ]},
+    "watch/providers": {"results": {"IN": {
+        "flatrate": [{"provider_name": "Netflix"}], "ads": [{"provider_name": "MX Player"}],
+        "rent": [{"provider_name": "Apple TV"}]}}},
     "release_dates": {"results": [
         {"iso_3166_1": "US", "release_dates": [{"certification": "PG-13"}]},
         {"iso_3166_1": "IN", "release_dates": [{"certification": ""}, {"certification": "UA"}]},
@@ -166,9 +172,29 @@ SEASON3 = {"name": "Season 3", "overview": "Third season.", "air_date": "2024-05
            ]}
 
 
+TVMAZE_ONLY = [{"score": 9, "show": {
+    "name": "Desi Streamer", "type": "Scripted", "premiered": "2023-03-01",
+    "webChannel": {"name": "MX Player"}, "externals": {"imdb": "tt30000009"},
+    "image": {"original": "https://static.tvmaze.com/ds.jpg"}}},
+    {"score": 5, "show": {"name": "No Imdb Show", "type": "Scripted", "externals": {"imdb": None}}}]
+
+
 def fake_http(self, url, params=None, headers=None, retries=1):
     params = params or {}
     path = url.split("?")[0]
+
+    if path == "https://en.wikipedia.org/w/api.php":
+        q = _norm(params.get("srsearch", ""))
+        if q.startswith("mnlit"):
+            return json.dumps({"query": {"searchinfo": {"suggestion": "moonlit hanbok"},
+                                         "search": [{"title": "Moonlit Hanbok"},
+                                                    {"title": "Mnlit (surname)"}]}})
+        return json.dumps({"query": {"search": []}})
+
+    if path == "https://api.tvmaze.com/search/shows":
+        if _norm(params.get("q", "")).startswith("desi stream"):
+            return json.dumps(TVMAZE_ONLY)
+        return json.dumps([])
 
     if "media-imdb.com/suggestion" in path:
         query = path.rsplit("/", 1)[1][: -len(".json")]
@@ -206,7 +232,19 @@ def fake_http(self, url, params=None, headers=None, retries=1):
                     {"media_type": "movie", "id": 777, "title": "Zorblax Returns",
                      "release_date": f"{NEXT_YEAR}-06-01", "poster_path": "/z.jpg", "popularity": 50},
                     {"media_type": "person", "id": 5, "name": "Zorblax"}]})
+            if q.startswith("nameless"):
+                return json.dumps({"results": [
+                    {"media_type": "tv", "id": 4242, "name": "Nameless Saga",
+                     "first_air_date": "2026-01-10", "poster_path": "/ns.jpg", "popularity": 20}]})
             return json.dumps({"results": []})
+        if route == "/tv/4242":
+            return json.dumps({"id": 4242, "name": "Nameless Saga", "overview": "Regional OTT series.",
+                               "first_air_date": "2026-01-10", "status": "Returning Series",
+                               "external_ids": {"imdb_id": None}, "poster_path": "/ns.jpg",
+                               "seasons": [{"season_number": 1, "name": "Season 1", "episode_count": 6,
+                                            "air_date": "2026-01-10"}]})
+        if route == "/tv/4242/external_ids":
+            return json.dumps({"imdb_id": None})
         if route == "/movie/777/external_ids":
             return json.dumps({"imdb_id": "tt9990001"})
         return None
@@ -354,6 +392,49 @@ class SearchTests(Base):
         kit.tmdb_api_key = None
         kit.search_title("interstellar")
         self.assertEqual(calls, [])
+
+
+class OttAndFranchiseTests(Base):
+    def test_franchise_both_titles_shown(self):
+        res = [t.title for t in self.kit.search_title("dhurandhar")]
+        self.assertEqual(res[:2], ["Dhurandhar", "Dhurandhar: The Revenge"])
+
+    def test_typo_in_sequel_still_shows_both(self):
+        res = [t.title for t in self.kit.search_title("dhurandhar the revange")]
+        self.assertEqual(res[0], "Dhurandhar: The Revenge")
+        self.assertIn("Dhurandhar", res)
+
+    def test_wikipedia_rescues_big_typo(self):
+        # without Wikipedia the typo is too big (and the title is not in the vocabulary yet)
+        kit = IMDBKit(tmdb_api_key=None, use_wikipedia=False)
+        kit.tmdb_api_key = None
+        self.assertEqual(len(kit.search_title("mnlit hnbk")), 0)
+        # with Wikipedia it is rescued (and then learned by the vocabulary)
+        res = self.kit.search_title("mnlit hnbk")
+        self.assertEqual(res.best.title, "Moonlit Hanbok")
+
+    def test_tvmaze_ott_show_with_platform(self):
+        res = self.kit_no_tmdb.search_title("desi streamr")
+        self.assertEqual(res.best.title, "Desi Streamer")
+        self.assertEqual(res.best.platform, "MX Player")
+        self.assertIn("MX Player", res.best.label)
+        self.assertEqual(len(res), 1)                     # show without IMDb id is skipped
+
+    def test_tmdb_only_title_has_usable_id(self):
+        res = self.kit.search_title("nameless saga")
+        self.assertEqual(res.best.imdb_id, "tmdb:tv:4242")
+        movie = self.kit.get_movie(res.best.imdb_id)
+        self.assertEqual((movie.title, movie.kind, movie.media_type), ("Nameless Saga", "Web Series", "tv"))
+        self.assertEqual(movie.url, "https://www.themoviedb.org/tv/4242")
+        self.assertEqual(movie.info_series.display_seasons[0]["code"], "S01")
+
+    def test_streaming_platforms(self):
+        m = self.kit.get_movie("tt0816692")
+        self.assertEqual((m.streaming_on, m.streaming_region), (["Netflix", "MX Player"], "IN"))
+
+    def test_user_catalogue_spellcheck(self):
+        IMDBKit.add_titles(["Quixotic Bazaar"])
+        self.assertIn("Quixotic Bazaar", IMDBKit._vocab.correct("quixotik bazar"))
 
 
 class DetailsTests(Base):
