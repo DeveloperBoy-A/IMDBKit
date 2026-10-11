@@ -25,6 +25,7 @@ from .textutils import (
     phonetic_key,
     prefix_variants,
     strip_article,
+    word_variants,
 )
 from .vocab import SEED_TITLES, TitleVocabulary
 
@@ -440,6 +441,7 @@ class IMDBKit:
         parsed = parse_media_query(value)
         return {
             "title": parsed["title"],
+            "title_punct": parsed.get("title_punct") or parsed["title"],
             "year": parsed["year"],
             "season": parsed["season"],
             "episode": parsed["episode"],
@@ -559,6 +561,78 @@ class IMDBKit:
 
         return float(max(scores))
 
+    @staticmethod
+    def _spelling_similarity(qa: str, ca: str) -> float:
+        """Pure spelling similarity (no prefix / containment bonus) of two normalised titles."""
+        qc, cc = qa.replace(" ", ""), ca.replace(" ", "")
+        if not qc or not cc:
+            return 0.0
+        return float(max(
+            fuzz.ratio(qa, ca),
+            fuzz.ratio(qc, cc),
+            0.97 * fuzz.ratio(phonetic_key(qa), phonetic_key(ca)),
+        ))
+
+    def _classify_match(self, parsed: Dict[str, Any], item: Title) -> str:
+        """
+        exact | phonetic | close | partial | weak   (see Title.match_type)
+
+        Only the user's OWN text is used here - corrections coming from the vocabulary,
+        Wikipedia or an AI never make a title "exact", so a wrong correction can never
+        be auto-applied.
+        """
+        candidate = strip_article(normalize_text(item.title))
+        cc = candidate.replace(" ", "")
+        if not cc:
+            return "weak"
+
+        queries = [
+            normalize_text(parsed.get(key))
+            for key in ("title", "title_loose", "title_with_year")
+        ] + [normalize_text(alt) for alt in parsed.get("alt_titles", [])]
+        queries = [strip_article(q) for q in queries if q]
+
+        c_nums = set(re.findall(r"\d+", candidate))
+        best = "weak"
+        order = {"weak": 0, "partial": 1, "close": 2, "phonetic": 3, "exact": 4}
+
+        for qa in queries:
+            qc = qa.replace(" ", "")
+            if not qc:
+                continue
+            q_nums = set(re.findall(r"\d+", qa))
+            kind = "weak"
+            if qc == cc:
+                kind = "exact"
+            elif q_nums != c_nums:
+                # "tiger 3" is not "tiger 2" / "tiger", whatever the spelling similarity
+                kind = "partial" if self._base_similarity(qa, candidate) >= 58 else "weak"
+            elif len(qc) >= 4 and phonetic_key(qa) == phonetic_key(candidate):
+                kind = "phonetic"
+            else:
+                spell = self._spelling_similarity(qa, candidate)
+                same_words = abs(len(qa.split()) - len(candidate.split())) <= 1
+                if spell >= 88 and same_words:
+                    kind = "close"
+                elif self._base_similarity(qa, candidate) >= 58:
+                    kind = "partial"
+            if order[kind] > order[best]:
+                best = kind
+        return best
+
+    @staticmethod
+    def _year_match(year: Optional[int], item: Title) -> Optional[str]:
+        if not year or not item.year:
+            return None
+        last = item.end_year or item.year
+        if year == item.year:
+            return "exact"
+        if item.year < year <= last:
+            return "within"
+        if abs(year - item.year) == 1 or year - last == 1:
+            return "near"
+        return "off"
+
     def _score_title(
         self,
         parsed: Dict[str, Any],
@@ -640,9 +714,11 @@ class IMDBKit:
         kind_filter: Optional[set],
         include_upcoming: bool,
         extra_queries: Optional[List[str]] = None,
+        relaxed: bool = False,
     ) -> List[Tuple[float, float, Title]]:
         extra_queries = extra_queries or []
         scored: List[Tuple[float, float, Title]] = []
+        year = parsed.get("year")
 
         for item in titles:
             if not self._filter_unwanted_kinds(item.kind):
@@ -652,19 +728,32 @@ class IMDBKit:
             if not include_upcoming and item.is_upcoming:
                 continue
             score, base = self._score_title(parsed, extra_queries, item)
+            item.match_type = self._classify_match(parsed, item)
+            item.year_match = self._year_match(year, item)
             scored.append((score, base, item))
 
         if not scored:
             return []
 
-        scored.sort(key=lambda row: (row[0], row[2].year or 0), reverse=True)
+        # TITLE FIRST, YEAR SECOND: a title that really is what the user typed always
+        # stays above fuzzy look-alikes, even if the typed year is wrong / missing.
+        tier = {"exact": 4, "phonetic": 3, "close": 2, "partial": 1, "weak": 0}
+        scored.sort(
+            key=lambda row: (tier[row[2].match_type], row[0], row[2].year or 0),
+            reverse=True,
+        )
+
+        if relaxed:
+            # Nothing matched well: still give the user the closest titles to pick from.
+            return [row for row in scored if row[1] >= 30.0][:8]
 
         top_score, top_base = scored[0][0], scored[0][1]
         min_base = 70.0 if top_base >= 95 else 58.0
 
         kept = [
             row for row in scored
-            if row[1] >= min_base and row[0] >= top_score - 40.0
+            if (row[1] >= min_base or row[2].match_type in ("exact", "phonetic", "close"))
+            and row[0] >= top_score - 40.0 - (30.0 if row[2].match_type == "exact" else 0.0)
         ]
 
         # ---- franchise / sibling titles ----
@@ -681,9 +770,17 @@ class IMDBKit:
                     form = strip_article(normalize_text(item.title)).replace(" ", "")
                     related = form.startswith(anchor) or (len(form) >= 5 and anchor.startswith(form))
                     if related and item.kind in ALLOWED_KINDS:
+                        if item.match_type == "weak":
+                            item.match_type = "partial"
                         kept.append((max(score, top_score - 12.0), base, item))
-                kept.sort(key=lambda row: (row[0], row[2].year or 0), reverse=True)
+                kept.sort(
+                    key=lambda row: (tier[row[2].match_type], row[0], row[2].year or 0),
+                    reverse=True,
+                )
 
+        for row in kept:
+            if row[2].match_type == "weak":
+                row[2].match_type = "partial"
         return kept
 
     # ============================================================
@@ -993,7 +1090,7 @@ class IMDBKit:
         if base >= GOOD_MATCH:
             return True
         year = parsed.get("year")
-        return bool(year and top.year == year and base >= 70)
+        return bool(year and top.year == year and base >= 80)
 
     @staticmethod
     def _compact_forms(parsed: Dict[str, Any]) -> set:
@@ -1089,8 +1186,10 @@ class IMDBKit:
             if weak:
                 corrections = self._correction_queries(parsed)
                 main = normalize_text(parsed["title"]) or normalize_text(parsed["title_loose"])
-                retrieval = self._dedupe(corrections + prefix_variants(main))
-                retrieval = [q for q in retrieval if q not in primary][:8]
+                retrieval = self._dedupe(
+                    corrections + prefix_variants(main) + word_variants(main)
+                )
+                retrieval = [q for q in retrieval if q not in primary][:10]
                 if retrieval:
                     self._merge(
                         candidates,
@@ -1122,20 +1221,37 @@ class IMDBKit:
             if tmdb_pool:
                 tmdb_pool.shutdown(wait=False)
 
+        # Nothing passed the quality bar -> still return the closest titles (flagged
+        # "weak") so the caller can show suggestions instead of "not found".
+        if not ranked:
+            ranked = self._rank(
+                parsed, candidates.values(), kind_filter, include_upcoming,
+                corrections, relaxed=True,
+            )
+
         titles: List[Title] = []
         for score, _, item in ranked[:results]:
             item.score = round(score, 1)
             titles.append(item)
 
+        # "Did you mean": only for a real spelling correction (never for a partial or
+        # weak look-alike like  "the mongoose" -> "The Mouse").
         corrected = None
-        if ranked and ranked[0][1] >= 58:
-            top_title = ranked[0][2].title
-            top_form = strip_article(normalize_text(top_title)).replace(" ", "")
+        if titles and titles[0].match_type in ("phonetic", "close"):
+            top_form = strip_article(normalize_text(titles[0].title)).replace(" ", "")
             if top_form not in self._compact_forms(parsed):
-                corrected = top_title
+                corrected = titles[0].title
+
+        year_found = None
+        if parsed["year"]:
+            good = [t for t in titles if t.match_type in ("exact", "phonetic", "close")] or titles
+            year_found = any(t.year_match in ("exact", "within") for t in good)
 
         if titles:
-            self._vocab.add_many(t.title for t in titles)
+            # only trustworthy titles teach the spell-check vocabulary
+            self._vocab.add_many(
+                t.title for t in titles if t.match_type in ("exact", "phonetic", "close")
+            )
 
         return SearchResult(
             titles,
@@ -1144,6 +1260,8 @@ class IMDBKit:
             year=parsed["year"],
             season=parsed["season"],
             episode=parsed["episode"],
+            parsed_title=parsed["title"] or parsed["title_loose"],
+            year_found=year_found,
         )
 
     def search_movie(self, title: str, results: int = 10) -> SearchResult:
