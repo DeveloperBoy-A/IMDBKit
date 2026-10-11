@@ -58,6 +58,13 @@ IMDB_DB = [
     item("tt30000002", "Dhurandhar: The Revenge", "movie", "feature", 2026, 95),
     item("tt30000003", "Moonlit Hanbok", "tvSeries", "TV series", 2024, 1500, yr="2024-"),
     item("tt0903747", "Breaking Bad", "tvSeries", "TV series", 2008, 20, yr="2008-2013"),
+    item("tt9100001", "Mr. Bachchan", "movie", "feature", 2024, 300),
+    item("tt9100002", "Bol Bachchan", "movie", "feature", 2012, 700),
+    item("tt9100003", "The Mouse", "movie", "feature", 2021, 5000),
+    item("tt9100004", "Full House", "tvSeries", "TV series", 1987, 900, yr="1987-1995"),
+    item("tt9100005", "Family Full House with Rohit", "tvSeries", "TV series", 2024, 50000, yr="2024-"),
+    item("tt9100007", "T-34", "movie", "feature", 2018, 9000),
+    item("tt9100008", "Mr. Bachchan Returns", "movie", "feature", 2019, 60000),
 ]
 
 
@@ -392,6 +399,69 @@ class SearchTests(Base):
         kit.tmdb_api_key = None
         kit.search_title("interstellar")
         self.assertEqual(calls, [])
+
+
+class StrictMatchTests(Base):
+    """Auto-correct only for REAL matches; everything else must be a suggestion."""
+
+    def test_typo_is_suggestion_not_autocorrect(self):
+        r = self.kit.search_title("mr bachachhan")
+        self.assertEqual(r.best.title, "Mr. Bachchan")      # never "Bol Bachchan"
+        self.assertEqual(r.best.match_type, "close")
+        self.assertIsNone(r.auto_correct)
+
+    def test_typo_with_year_same_top(self):
+        r = self.kit.search_title("mr bachachhan 2024")
+        self.assertEqual(r.best.title, "Mr. Bachchan")
+        self.assertEqual(r.best.year_match, "exact")
+        self.assertTrue(r.year_found)
+
+    def test_missing_title_not_replaced_by_lookalike(self):
+        r = self.kit.search_title("the mongoose 2026")
+        self.assertIsNone(r.auto_correct)
+        self.assertIsNone(r.corrected_query)
+        self.assertTrue(all(t.match_type in ("partial", "weak") for t in r.titles))
+        self.assertIn("2026", r.year_note or "")
+
+    def test_extra_words_never_autocorrect_to_shorter_title(self):
+        r = self.kit.search_title("full house with rohit s01 e07")
+        self.assertIsNone(r.auto_correct)
+        self.assertEqual((r.season, r.episode), (1, 7))
+        self.assertIn("Full House", [t.title for t in r.titles])
+
+    def test_full_exact_title_is_autocorrect(self):
+        r = self.kit.search_title("family full house with rohit s01 e07")
+        self.assertEqual(r.auto_correct, "Family Full House with Rohit")
+
+    def test_roman_hindi_spelling_is_autocorrect(self):
+        self.assertEqual(self.kit.search_title("pathan").auto_correct, "Pathaan")
+
+    def test_wrong_year_keeps_exact_title_first(self):
+        r = self.kit.search_title("mr bachchan 2019")
+        self.assertEqual(r.best.title, "Mr. Bachchan")
+        self.assertEqual(r.best.year_match, "off")
+        self.assertFalse(r.year_found)
+
+    def test_sequel_number_is_never_exact(self):
+        r = self.kit.search_title("dune 2")
+        self.assertIsNone(r.auto_correct)
+
+    def test_no_good_match_still_gives_suggestions(self):
+        r = self.kit.search_title("t-170 2026")
+        self.assertTrue(len(r) >= 1)
+        self.assertIsNone(r.auto_correct)
+        self.assertEqual(r.best.match_type, "weak")
+
+    def test_year_does_not_change_title_choice(self):
+        with_year = self.kit.search_title("dune 1984").exact_titles
+        without = self.kit.search_title("dune").exact_titles
+        self.assertEqual({t.imdb_id for t in with_year}, {t.imdb_id for t in without})
+        self.assertEqual(self.kit.search_title("dune 1984").best.year, 1984)
+
+    def test_punctuation_kept_for_imdb_lookup(self):
+        parsed = parse_media_query("T-170 2026")
+        self.assertEqual(parsed["title_punct"], "T-170")
+        self.assertEqual(parsed["year"], 2026)
 
 
 class OttAndFranchiseTests(Base):
