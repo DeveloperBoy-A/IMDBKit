@@ -99,6 +99,15 @@ class Title:
     overview: Optional[str] = None
     score: float = 0.0                      # relevance score of the last search
     platform: Optional[str] = None          # e.g. "Netflix" (when known)
+    # How well the title matches what the user typed (set by search):
+    #   "exact"    same title (ignoring case / punctuation / leading The-A-An)
+    #   "phonetic" same pronunciation (pathan / pathaan, mirjapur / mirzapur)
+    #   "close"    small typo (intersteler)
+    #   "partial"  shares words / is a prefix / franchise sibling
+    #   "weak"     best-effort suggestion only
+    match_type: str = ""
+    # Only when the query had a year: "exact" | "within" (running series) | "near" (+-1) | "off"
+    year_match: Optional[str] = None
 
     @property
     def movieID(self) -> str:
@@ -211,6 +220,8 @@ class Title:
             "label": self.label,
             "tmdb_id": self.tmdb_id,
             "platform": self.platform,
+            "match_type": self.match_type,
+            "year_match": self.year_match,
         }
 
 
@@ -227,6 +238,11 @@ class SearchResult:
     year: Optional[int] = None              # year parsed from the query
     season: Optional[int] = None            # season parsed from the query (S01 -> 1)
     episode: Optional[int] = None           # episode parsed from the query (E02 -> 2)
+    parsed_title: Optional[str] = None      # query with year / season / junk removed
+    year_found: Optional[bool] = None       # query had a year: does any *good* match have it?
+
+    # Title types that are safe to auto-correct to (the user's title, spelled differently).
+    AUTO_TYPES = ("exact", "phonetic")
 
     def __iter__(self):
         return iter(self.titles)
@@ -240,6 +256,32 @@ class SearchResult:
     @property
     def best(self) -> Optional[Title]:
         return self.titles[0] if self.titles else None
+
+    @property
+    def match_type(self) -> str:
+        """Match quality of the best title: exact / phonetic / close / partial / weak / ''."""
+        return self.titles[0].match_type if self.titles else ""
+
+    @property
+    def exact_titles(self) -> List["Title"]:
+        """Titles that ARE what the user typed (exact or same pronunciation)."""
+        return [t for t in self.titles if t.match_type in self.AUTO_TYPES]
+
+    @property
+    def auto_correct(self) -> Optional[str]:
+        """
+        Title that is safe to use WITHOUT asking the user (exact / phonetic match only),
+        else None -> show self.titles as suggestions instead.
+        """
+        exact = self.exact_titles
+        return exact[0].title if exact else None
+
+    @property
+    def year_note(self) -> Optional[str]:
+        """Human readable hint when the typed year matches no good result."""
+        if self.year and self.titles and self.year_found is False:
+            return f"No match found for year {self.year}; showing closest titles."
+        return None
 
     @property
     def season_code(self) -> Optional[str]:
