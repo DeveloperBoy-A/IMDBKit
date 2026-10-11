@@ -1,90 +1,96 @@
-IMDBKit
+<div align="center">
 
-IMDb + TMDB metadata library for Python apps and Telegram bots.
+<img src="assets/banner.svg" alt="TOKYO_UPDATES" width="100%"/>
 
-Features
+# 𝐓ᴏᴋʏᴏ_𝐔ᴘᴅᴀᴛᴇꜱ · IMDBKit
 
-- Spell-tolerant search: typos (intersteler), Roman-Hindi spellings (pathan / pathaan,
-  mirjapur / mirzapur), Devanagari input (पठान), file names (Pushpa.2021.1080p.WEB-DL)
-- "Did you mean" (result.corrected_query)
-- Optional AI spell check hook (ai_corrector=your_llm_function)
-- Only movies, web series, mini series and TV movies (no games, podcasts, shorts, episodes, people)
-- Past and upcoming (future) titles, with is_upcoming / status
-- Year in query is used to pick the right one ("dune 1984", "dune part two 2024")
-- Poster (portrait) + backdrop (landscape) + extra posters/backdrops + logo + trailer
-- Plot, runtime (runtime_text = "2h 49m"), genres, languages, countries, certificates,
-  cast (with characters/photos), directors, writers, producers, composer, cinematographer
-- Real IMDb rating/votes (from the IMDb page) with TMDB rating as fallback
-- Series: seasons (S01), episodes (S01E01), per-episode plot/runtime/air date/still
-- Works without a TMDB key (IMDb only) but backdrops and seasons/episodes need a free TMDB key
+**IMDb + TMDB metadata engine for Python apps & Telegram bots**
 
-Install
+![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Version](https://img.shields.io/badge/version-1.2.0-ff2e63?style=for-the-badge)
+![License](https://img.shields.io/badge/license-MIT-8e44ad?style=for-the-badge)
+![Tests](https://img.shields.io/badge/tests-48%20passing-2ecc71?style=for-the-badge)
 
+[✨ Features](#-key-features) · [⚡ Install](#-install) · [🚀 Usage](#-quick-usage) · [🎯 Strict Match](#-strict-matching) · [💬 Support](#-support)
+
+</div>
+
+---
+
+## ✨ Key Features
+
+| | Feature | What it does |
+|---|---|---|
+| 🔎 | **Spell-tolerant search** | Typos (`intersteler`), Roman-Hindi (`pathan` = Pathaan), Devanagari (`पठान`), file names (`Pushpa.2021.1080p.WEB-DL`) |
+| 🎯 | **Strict matching** | Every result is tagged `exact / phonetic / close / partial / weak`. Auto-correct only when it is the real title |
+| 📅 | **Year smart** | Title decides, year only helps. Wrong year is detected and reported, never hides the right title |
+| 🎬 | **Movies & Series only** | No games, podcasts, shorts, episodes or people. Past and upcoming titles |
+| 🖼️ | **Posters & Backdrops** | Poster, backdrop, extra images, logo and trailer |
+| 📺 | **Seasons & Episodes** | `S01`, `S01E01`, per-episode plot, runtime, air date, still |
+| ⭐ | **Real IMDb rating** | IMDb rating and votes, TMDB as fallback |
+| 📡 | **OTT coverage** | Netflix, JioHotstar, MX Player, Korean dramas via TMDB + TVMaze + Wikipedia |
+| 💡 | **Suggestions** | Ready-made button labels: `Interstellar (2014) • Movie` |
+| ⚡ | **Fast & safe** | Thread-safe, cached, request-coalescing |
+
+---
+
+## ⚡ Install
+
+```bash
 pip install git+https://github.com/DeveloperBoy-A/IMDBKit.git@main
+```
 
-Usage
+## 🚀 Quick Usage
 
+```python
 from imdbkit import IMDBKit
 
-imdb = IMDBKit(tmdb_api_key="YOUR_TMDB_KEY")   # or env TMDB_API_KEY (v3 key or v4 token)
+imdb = IMDBKit(tmdb_api_key="YOUR_TMDB_KEY")   # or env TMDB_API_KEY
 
-res = imdb.search_movie("intersteler")
-print(res.corrected_query)          # Interstellar
+res = imdb.search_title("mr bachachhan 2024")
 for t in res:
-    print(t.label)                  # Interstellar (2014) • Movie
-    print(t.imdb_id, t.kind, t.year, t.image_url, t.is_upcoming)
+    print(t.label, t.match_type, t.year_match)  # Mr. Bachchan (2024) • Movie  close  exact
 
 movie = imdb.get_movie("tt0816692")
-movie.title, movie.year, movie.plot, movie.runtime_text, movie.rating
-movie.cover_url      # poster
-movie.backdrop_url   # backdrop
-movie.posters, movie.backdrops, movie.trailer_url
+print(movie.title, movie.rating, movie.runtime_text, movie.cover_url)
 
-Series
+ep = imdb.get_episode("tt12004706", 3, 2)       # S03E02
+```
 
-show = imdb.get_movie("tt12004706")
-for s in show.info_series.display_seasons:     # {"code": "S01", "episodes": 8, ...}
-    print(s["code"], s["episodes"])
+## 🎯 Strict Matching
 
-season = imdb.get_season("tt12004706", 3)
-ep = imdb.get_episode("tt12004706", 3, 2)
-print(ep.code, ep.title, ep.plot, ep.runtime_text, ep.still_url)    # S03E02 ...
+```python
+res = imdb.search_title("the mongoose 2026")
 
-One call
+res.auto_correct   # safe title to use without asking, else None
+res.exact_titles   # titles that really are what the user typed
+res.year_found     # False -> typed year matches nothing
+res.year_note      # ready-made hint text
+```
 
-m = imdb.lookup("panchayat s03e02")    # series + m.episode_info
-m = imdb.lookup("panchayat season 3")  # series + m.season_info
+| Query | Result |
+|---|---|
+| `pathan` | ✅ auto-correct → **Pathaan** |
+| `mr bachachhan` | 💡 suggestion → Mr. Bachchan |
+| `the mongoose 2026` | 💡 suggestions only, never "The Mouse" |
+| `full house with rohit s01 e07` | 💡 suggestions only, never plain "Full House" |
+| `t-170 2026` | 💡 closest titles instead of "not found" |
 
-Buttons / autocomplete
+> Auto-correct only when `res.auto_correct` is not `None`, otherwise show `res.titles` as suggestion buttons.
 
-imdb.suggestions("avngers", limit=6)
+## 🧪 Tests
 
-AI spell check (optional)
+```bash
+python -m unittest discover -s tests -v   # offline, fake IMDb/TMDB backend
+```
 
-def fix(query):            # call any LLM here; return corrected title(s)
-    return "Avengers"
-imdb = IMDBKit(tmdb_api_key=KEY, ai_corrector=fix)   # only called if local correction fails
+## 💬 Support
 
-Titles from Netflix / JioHotstar / MX Player / Korean dramas etc.
+Made with ❤️ by **𝐓ᴏᴋʏᴏ_𝐔ᴘᴅᴀᴛᴇꜱ**
+📢 Updates & support: [t.me/YOUR_CHANNEL](https://t.me/YOUR_CHANNEL)
 
-- Wikipedia is used as a typo-tolerant name dictionary (IMDBKit(use_wikipedia=True)).
-- TVMaze adds OTT series with the platform (title.platform == "MX Player").
-- Titles that exist only on TMDB get the id "tmdb:tv:123" / "tmdb:movie:123"; get_movie() and
-  get_season() accept it.
-- movie.streaming_on -> ["Netflix", "JioHotstar"] for IMDBKit(region="IN").
-- Teach your own catalogue:  IMDBKit.add_titles(["Title 1", "Title 2"])
-  and keep it across restarts:  IMDBKit.save_vocabulary("vocab.json") / IMDBKit.load_vocabulary("vocab.json")
-- Franchise titles are shown together: "Dhurandhar" and "Dhurandhar: The Revenge".
+<div align="center">
 
-Compatibility
+**MIT License · © 𝐓ᴏᴋʏᴏ_𝐔ᴘᴅᴀᴛᴇꜱ**
 
-Existing code keeps working: search_movie(), get_movie(), result.titles, title.movieID,
-movie.get("title"), movie.cover_url, movie.info_series.display_seasons, etc.
-
-Tests
-
-python -m unittest discover -s tests -v      (offline, uses a fake IMDb/TMDB backend)
-
-License
-
-MIT License
+</div>
