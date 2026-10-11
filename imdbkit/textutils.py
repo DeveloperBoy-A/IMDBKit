@@ -232,6 +232,13 @@ _OTHER_NOISE = {
 _TRAIL_NOISE = _SERIES_NOISE | _MOVIE_NOISE | _OTHER_NOISE
 
 
+def _tidy_keep(text: str) -> str:
+    """Like _tidy but keeps '-', '.', ':' and '&' (IMDb needs 'T-170', 'Mr. Bachchan')."""
+    text = re.sub(r"[^\w'\-.:&]+", " ", text, flags=re.UNICODE).replace("_", " ")
+    text = re.sub(r"\s+", " ", text).strip(" -.:")
+    return text
+
+
 def _tidy(text: str) -> str:
     text = re.sub(r"[^\w']+", " ", text, flags=re.UNICODE)
     text = text.replace("_", " ")
@@ -315,8 +322,13 @@ def _parse(raw: str, long_vowels: bool) -> Dict[str, Any]:
     if season is not None or episode is not None:
         kind_hint = "series"
 
+    punct_tokens = _tidy_keep(head).split()
+    while len(punct_tokens) > 1 and re.sub(r"[^a-z0-9]", "", punct_tokens[-1].lower()) in _TRAIL_NOISE:
+        punct_tokens.pop()
+
     return {
         "raw": raw,
+        "title_punct": " ".join(punct_tokens),
         "title": " ".join(tokens),
         "title_loose": loose,
         "title_with_year": title_with_year,
@@ -339,7 +351,7 @@ def parse_media_query(value: Any) -> Dict[str, Any]:
     raw = "" if value is None else str(value).strip()
     if not raw:
         return {
-            "raw": "", "title": "", "title_loose": "", "title_with_year": None,
+            "raw": "", "title": "", "title_punct": "", "title_loose": "", "title_with_year": None,
             "year": None, "season": None, "episode": None, "is_series": False,
             "kind_hint": None, "alt_titles": [],
         }
@@ -413,6 +425,37 @@ def prefix_variants(norm: str) -> List[str]:
     return result
 
 
+def word_variants(norm: str) -> List[str]:
+    """
+    Extra retrieval strings for a query that found nothing useful: every word on its
+    own, first two words, last two words and 'mr bach'-style word + prefix.
+    (IMDb suggestions are prefix based, so a typo late in the title kills the lookup.)
+    """
+    words = [w for w in (norm or "").split() if w]
+    out: List[str] = []
+    if len(words) > 1:
+        out.append(" ".join(words[:2]))
+        out.append(" ".join(words[-2:]))
+        if len(words[1]) >= 4:
+            out.append(words[0] + " " + words[1][:3])
+    for w in words:
+        if len(w) >= 3 and not w.isdigit():
+            out.append(w)
+            if len(w) >= 6:
+                out.append(w[: max(3, len(w) // 2)])
+    if words and words[0] not in out:
+        out.append(words[0])           # very short titles ("T-170"): still try the first word
+    if len(words) > 1 and "".join(words) not in out and len("".join(words)) <= 20:
+        out.append("".join(words))
+    seen, result = set(), []
+    for item in out:
+        item = item.strip()
+        if item and item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
 def build_primary_queries(parsed: Dict[str, Any], limit: int = 6) -> List[str]:
     """First-wave search strings for a parsed query."""
     queries: List[str] = []
@@ -424,13 +467,17 @@ def build_primary_queries(parsed: Dict[str, Any], limit: int = 6) -> List[str]:
         if q and q not in queries:
             queries.append(q)
 
+    punct = (parsed.get("title_punct") or "").strip().lower()
+    if punct and re.search(r"[-.:&]", punct):
+        queries.append(punct)          # "t-170", "mr. bachchan", "spider-man"
+
     add(parsed.get("title"))
     add(parsed.get("title_loose"))
     add(parsed.get("title_with_year"))
     for alt in parsed.get("alt_titles", []):
         add(alt)
 
-    main = queries[0] if queries else ""
+    main = normalize_text(parsed.get("title")) or normalize_text(parsed.get("title_loose"))
     if main:
         if " " in main and len(main.replace(" ", "")) <= 20:
             add(main.replace(" ", ""))
