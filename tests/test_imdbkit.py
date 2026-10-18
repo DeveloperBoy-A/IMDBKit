@@ -65,6 +65,7 @@ IMDB_DB = [
     item("tt9100005", "Family Full House with Rohit", "tvSeries", "TV series", 2024, 50000, yr="2024-"),
     item("tt9100007", "T-34", "movie", "feature", 2018, 9000),
     item("tt9100008", "Mr. Bachchan Returns", "movie", "feature", 2019, 60000),
+    item("tt31000001", "Nayi Naveli", "movie", "feature", 2026, 700),
 ]
 
 
@@ -186,6 +187,11 @@ TVMAZE_ONLY = [{"score": 9, "show": {
     {"score": 5, "show": {"name": "No Imdb Show", "type": "Scripted", "externals": {"imdb": None}}}]
 
 
+NAYYI_ROW = {"id": 31000, "title": "Nayyi NAVELLI", "original_title": "Nayyi Navelli",
+             "release_date": "2026-10-02", "poster_path": "/nayyi_tmdb.jpg",
+             "backdrop_path": "/nayyi_bd.jpg", "overview": "Bride story.", "popularity": 12}
+
+
 def fake_http(self, url, params=None, headers=None, retries=1):
     params = params or {}
     path = url.split("?")[0]
@@ -222,6 +228,8 @@ def fake_http(self, url, params=None, headers=None, retries=1):
             return json.dumps({"movie_results": [], "tv_results": [], "tv_episode_results": [
                 {"show_id": 1234, "season_number": 3, "episode_number": 2, "name": "Chakka Jam",
                  "overview": "Ep plot", "runtime": 35, "still_path": "/e2.jpg"}]})
+        if route == "/find/tt31000001":
+            return json.dumps({"movie_results": [NAYYI_ROW], "tv_results": []})
         if route.startswith("/find/"):
             return json.dumps({"movie_results": [], "tv_results": []})
         if route == "/movie/157336":
@@ -239,11 +247,15 @@ def fake_http(self, url, params=None, headers=None, retries=1):
                     {"media_type": "movie", "id": 777, "title": "Zorblax Returns",
                      "release_date": f"{NEXT_YEAR}-06-01", "poster_path": "/z.jpg", "popularity": 50},
                     {"media_type": "person", "id": 5, "name": "Zorblax"}]})
+            if q.startswith("nayyi navelli"):
+                return json.dumps({"results": [dict(NAYYI_ROW, media_type="movie")]})
             if q.startswith("nameless"):
                 return json.dumps({"results": [
                     {"media_type": "tv", "id": 4242, "name": "Nameless Saga",
                      "first_air_date": "2026-01-10", "poster_path": "/ns.jpg", "popularity": 20}]})
             return json.dumps({"results": []})
+        if route == "/movie/31000/external_ids":
+            return json.dumps({"imdb_id": "tt31000001"})
         if route == "/tv/4242":
             return json.dumps({"id": 4242, "name": "Nameless Saga", "overview": "Regional OTT series.",
                                "first_air_date": "2026-01-10", "status": "Returning Series",
@@ -251,6 +263,12 @@ def fake_http(self, url, params=None, headers=None, retries=1):
                                "seasons": [{"season_number": 1, "name": "Season 1", "episode_count": 6,
                                             "air_date": "2026-01-10"}]})
         if route == "/tv/4242/external_ids":
+            return json.dumps({"imdb_id": None})
+        if route == "/movie/31000":
+            return json.dumps(dict(NAYYI_ROW, external_ids={"imdb_id": "tt31000001"}, overview="Bride story.",
+                                   release_date="2026-10-02", runtime=138, credits={"cast": [], "crew": []},
+                                   images={"posters": [], "backdrops": [], "logos": []}, videos={"results": []}))
+        if route == "/movie/31001/external_ids":
             return json.dumps({"imdb_id": None})
         if route == "/movie/777/external_ids":
             return json.dumps({"imdb_id": "tt9990001"})
@@ -295,6 +313,72 @@ class TextTests(unittest.TestCase):
         self.assertEqual((p["title"], p["season"], p["is_series"]), ("money heist", 5, True))
         p = parse_media_query("mirzapur 2 x 4")
         self.assertIsNone(p["episode"])
+
+
+class BothDatabasesTests(Base):
+    """IMDb says "Nayi Naveli", TMDB says "Nayyi NAVELLI": same film, one result, both names."""
+
+    def test_imdb_spelling_gets_tmdb_name_and_posters(self):
+        res = self.kit.search_title("nayi naveli")
+        self.assertEqual(len(res), 1)
+        t = res.best
+        self.assertEqual(t.imdb_id, "tt31000001")
+        self.assertEqual(t.names, ["Nayi Naveli", "Nayyi NAVELLI"])
+        self.assertEqual(t.imdb_title, "Nayi Naveli")
+        self.assertEqual(t.tmdb_title, "Nayyi NAVELLI")
+        self.assertIn("Nayyi NAVELLI", t.label)
+        self.assertIn("Nayi Naveli", t.label)
+        self.assertTrue(t.imdb_poster_url and t.tmdb_poster_url)
+        self.assertIn("nayyi_tmdb.jpg", t.tmdb_poster_url)
+        self.assertEqual(sorted(t.sources), ["imdb", "tmdb"])
+
+    def test_tmdb_spelling_finds_same_single_result(self):
+        res = self.kit.search_title("nayyi navelli")
+        self.assertEqual([t.imdb_id for t in res], ["tt31000001"])   # no duplicate
+        self.assertEqual(res.best.match_type, "exact" if res.best.tmdb_title.lower() == "nayyi navelli" else "phonetic")
+        self.assertIsNotNone(res.auto_correct)
+
+    def test_similarity_for_caller_threshold(self):
+        self.assertGreaterEqual(self.kit.search_title("nayi naveli").best.similarity, 98)
+        self.assertGreaterEqual(self.kit.search_title("nayyi navelli").best.similarity, 98)
+        res = self.kit.search_title("mr bachachhan")          # typo of Mr. Bachchan
+        self.assertGreaterEqual(res.best.similarity, 80)
+        for t in self.kit.search_title("the mongoose 2026").titles:   # look-alikes stay low
+            self.assertLess(t.similarity, 80)
+
+    def test_without_tmdb_key_still_one_result(self):
+        res = self.kit_no_tmdb.search_title("nayi naveli")
+        self.assertEqual(res.best.names, ["Nayi Naveli"])
+
+    def test_tmdb_placeholder_is_folded_into_imdb_entry(self):
+        from imdbkit.models import Title
+        store = {}
+        imdb_t = Title(imdb_id="tt31000001", title="Nayi Naveli", imdb_title="Nayi Naveli", year=2026,
+                       kind="Movie", sources=["imdb"])
+        tmdb_t = Title(imdb_id="tmdb:movie:31001", title="Nayyi NAVELLI", tmdb_title="Nayyi NAVELLI", year=2026,
+                       kind="Movie", tmdb_poster_url="https://x/p.jpg", sources=["tmdb"])
+        IMDBKit._merge(store, [[tmdb_t], [imdb_t]])
+        self.kit._collapse_duplicates(store)
+        self.assertEqual(list(store), ["tt31000001"])
+        self.assertEqual(store["tt31000001"].names, ["Nayi Naveli", "Nayyi NAVELLI"])
+        self.assertEqual(store["tt31000001"].tmdb_poster_url, "https://x/p.jpg")
+
+    def test_two_real_imdb_pages_never_merge(self):
+        from imdbkit.models import Title
+        store = {}
+        a = Title(imdb_id="tt1", title="Dune", year=2021, kind="Movie")
+        b = Title(imdb_id="tt2", title="Dune", year=2021, kind="Movie")
+        IMDBKit._merge(store, [[a], [b]])
+        self.kit._collapse_duplicates(store)
+        self.assertEqual(len(store), 2)
+
+    def test_get_movie_has_both_posters_and_names(self):
+        m = self.kit.get_movie("tt31000001")
+        self.assertEqual(m.title, "Nayi Naveli")
+        self.assertEqual(m.tmdb_title, "Nayyi NAVELLI")
+        self.assertIn("Nayyi Navelli", m.names + [m.original_title])
+        self.assertIn("nayyi_tmdb.jpg", m.tmdb_poster_url or "")
+        self.assertTrue(m.imdb_poster_url)
 
 
 class SearchTests(Base):
