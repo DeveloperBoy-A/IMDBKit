@@ -16,9 +16,10 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from rapidfuzz import fuzz
 
-from .models import Episode, Movie, SearchResult, Season, SeriesInfo, Title
+from .models import Episode, Movie, SearchResult, Season, SeriesInfo, Title, unique_names
 from .textutils import (
     build_primary_queries,
+    double_letter_variants,
     current_year,
     normalize_text,
     parse_media_query,
@@ -580,8 +581,50 @@ class IMDBKit:
         Only the user's OWN text is used here - corrections coming from the vocabulary,
         Wikipedia or an AI never make a title "exact", so a wrong correction can never
         be auto-applied.
+
+        A title is checked under EVERY name it is known by (IMDb spelling, TMDB spelling,
+        original title ...), so "nayi naveli" and "nayyi navelli" both find the same film.
         """
-        candidate = strip_article(normalize_text(item.title))
+        order = {"weak": 0, "partial": 1, "close": 2, "phonetic": 3, "exact": 4}
+        best = "weak"
+        for name in item.names or [item.title]:
+            kind = self._classify_name(parsed, name)
+            if order[kind] > order[best]:
+                best = kind
+        return best
+
+    def _similarity(self, parsed: Dict[str, Any], item: Title) -> float:
+        """Best 0-100 spelling similarity of the user's text to ANY name of the title.
+
+        Same pronunciation counts as 98, the same text as 100.  A different sequel number
+        gives 0 ("tiger 3" must never auto-correct to "tiger 2").
+        """
+        queries = [
+            strip_article(normalize_text(parsed.get(key)))
+            for key in ("title", "title_loose", "title_with_year")
+        ] + [strip_article(normalize_text(a)) for a in parsed.get("alt_titles", [])]
+        queries = [q for q in queries if q]
+        best = 0.0
+        for name in item.names or [item.title]:
+            candidate = strip_article(normalize_text(name))
+            cc = candidate.replace(" ", "")
+            if not cc:
+                continue
+            c_nums = set(re.findall(r"\d+", candidate))
+            for qa in queries:
+                qc = qa.replace(" ", "")
+                if not qc or set(re.findall(r"\d+", qa)) != c_nums:
+                    continue
+                if qc == cc:
+                    return 100.0
+                if len(qc) >= 4 and phonetic_key(qa) == phonetic_key(candidate):
+                    best = max(best, 98.0)
+                else:
+                    best = max(best, self._spelling_similarity(qa, candidate))
+        return round(best, 1)
+
+    def _classify_name(self, parsed: Dict[str, Any], name: str) -> str:
+        candidate = strip_article(normalize_text(name))
         cc = candidate.replace(" ", "")
         if not cc:
             return "weak"
@@ -640,9 +683,19 @@ class IMDBKit:
         item: Title,
     ) -> Tuple[float, float]:
         """Returns (final_score, base_similarity)."""
-        candidate = normalize_text(item.title)
-        if not candidate:
+        candidates = [normalize_text(n) for n in (item.names or [item.title])]
+        candidates = [c for c in candidates if c]
+        if not candidates:
             return 0.0, 0.0
+        # the name that matches the query best drives the score
+        candidate = max(
+            candidates,
+            key=lambda c: max(
+                [self._base_similarity(normalize_text(parsed.get(k)), c)
+                 for k in ("title", "title_loose", "title_with_year")
+                 if normalize_text(parsed.get(k))] or [0.0]
+            ),
+        )
 
         main_queries = [
             normalize_text(parsed.get(key))
@@ -650,11 +703,13 @@ class IMDBKit:
         ] + [normalize_text(alt) for alt in parsed.get("alt_titles", [])]
         main_queries = [q for q in main_queries if q]
 
-        base = max([self._base_similarity(q, candidate) for q in main_queries] or [0.0])
+        base = max(
+            [self._base_similarity(q, c) for q in main_queries for c in candidates] or [0.0]
+        )
         for corrected in extra_queries:
             # A correction (vocabulary / AI) is slightly less trustworthy than the
             # user's own text.
-            base = max(base, 0.94 * self._base_similarity(corrected, candidate))
+            base = max(base, 0.94 * max(self._base_similarity(corrected, c) for c in candidates))
 
         score = base
 
@@ -729,6 +784,7 @@ class IMDBKit:
                 continue
             score, base = self._score_title(parsed, extra_queries, item)
             item.match_type = self._classify_match(parsed, item)
+            item.similarity = self._similarity(parsed, item)
             item.year_match = self._year_match(year, item)
             scored.append((score, base, item))
 
@@ -823,12 +879,16 @@ class IMDBKit:
         image = item.get("i")
         image_url = image.get("imageUrl") if isinstance(image, dict) else None
 
+        poster = self.imdb_image(image_url, 500)
         return Title(
             imdb_id=imdb_id,
             title=name,
+            imdb_title=name,
+            imdb_poster_url=poster,
+            sources=["imdb"],
             year=year,
             kind=self._normalize_kind(item.get("qid") or item.get("q") or item.get("kind")),
-            image_url=self.imdb_image(image_url, 500),
+            image_url=poster,
             end_year=end_year,
             cast_text=self._clean_text(item.get("s")),
             rank=self._safe_int(item.get("rank")),
@@ -918,12 +978,17 @@ class IMDBKit:
                     continue
 
                 release = row.get("release_date") or row.get("first_air_date")
+                tmdb_poster = self._tmdb_img(row.get("poster_path"), "w500")
                 draft = Title(
                     imdb_id="",
                     title=name,
+                    tmdb_title=name,
+                    original_title=self._clean_text(original) if original else None,
+                    tmdb_poster_url=tmdb_poster,
+                    sources=["tmdb"],
                     year=self._year_from_date(release),
                     kind="Movie" if media_type == "movie" else "Web Series",
-                    image_url=self._tmdb_img(row.get("poster_path"), "w500"),
+                    image_url=tmdb_poster,
                     release_date=release or None,
                     tmdb_id=tmdb_id,
                     backdrop_url=self._tmdb_img(row.get("backdrop_path"), self.BACKDROP_SIZE),
@@ -1105,8 +1170,29 @@ class IMDBKit:
                 forms.add(strip_article(norm).replace(" ", ""))
         return forms
 
-    @staticmethod
-    def _merge(store: Dict[str, Title], groups: Iterable[Iterable[Title]]) -> None:
+    _MERGE_ATTRS = (
+        "year", "kind", "image_url", "end_year", "cast_text", "rank",
+        "popularity", "release_date", "tmdb_id", "backdrop_url", "overview",
+        "platform", "imdb_title", "tmdb_title", "original_title",
+        "imdb_poster_url", "tmdb_poster_url",
+    )
+
+    @classmethod
+    def _absorb(cls, current: Title, item: Title) -> None:
+        """Copy everything `item` knows into `current` (same film, other database)."""
+        for attr in cls._MERGE_ATTRS:
+            if getattr(current, attr) in (None, "") and getattr(item, attr) not in (None, ""):
+                setattr(current, attr, getattr(item, attr))
+        # every spelling is kept, never thrown away
+        current.alt_titles = unique_names(
+            list(current.alt_titles or []) + list(item.alt_titles or []) + [item.title]
+        )
+        for src in item.sources or []:
+            if src not in current.sources:
+                current.sources.append(src)
+
+    @classmethod
+    def _merge(cls, store: Dict[str, Title], groups: Iterable[Iterable[Title]]) -> None:
         for group in groups:
             for item in group:
                 if not item.imdb_id:
@@ -1115,13 +1201,115 @@ class IMDBKit:
                 if current is None:
                     store[item.imdb_id] = item
                     continue
-                for attr in (
-                    "year", "kind", "image_url", "end_year", "cast_text", "rank",
-                    "popularity", "release_date", "tmdb_id", "backdrop_url", "overview",
-                    "platform",
-                ):
-                    if getattr(current, attr) in (None, "") and getattr(item, attr) not in (None, ""):
-                        setattr(current, attr, getattr(item, attr))
+                if current is not item:
+                    cls._absorb(current, item)
+
+    @staticmethod
+    def _title_forms(item: Title) -> set:
+        forms = set()
+        for name in item.names or [item.title]:
+            norm = strip_article(normalize_text(name))
+            if norm:
+                forms.add(norm.replace(" ", ""))
+                key = phonetic_key(norm)
+                if key:
+                    forms.add("p:" + key)
+        return forms
+
+    def _collapse_duplicates(self, store: Dict[str, Title]) -> None:
+        """
+        TMDB sometimes only knows a film as "tmdb:movie:123" while IMDb has "tt..." for the
+        very same film (or the other way round), so it shows up twice with two spellings.
+        Same year (+-1) + same kind + same (or same-sounding) name  ->  one entry, both
+        names.  Only a "tmdb:..." placeholder is ever folded into another entry.
+        """
+        def bucket(item: Title):
+            return "series" if item.kind in SERIES_KINDS else "movie"
+
+        # real IMDb ids first, so they win as the primary entry
+        keys = sorted(store, key=lambda k: (not k.startswith("tt"), k))
+        kept: List[str] = []
+        for key in keys:
+            item = store[key]
+            twin = None
+            for other_key in kept:
+                if key.startswith("tt") and other_key.startswith("tt"):
+                    continue          # two real IMDb pages are two different titles
+                other = store[other_key]
+                if bucket(other) != bucket(item):
+                    continue
+                if item.tmdb_id and item.tmdb_id == other.tmdb_id:
+                    twin = other
+                    break
+                if item.year and other.year and abs(item.year - other.year) > 1:
+                    continue
+                if (item.year is None) != (other.year is None):
+                    continue
+                if self._title_forms(item) & self._title_forms(other):
+                    twin = other
+                    break
+            if twin is None:
+                kept.append(key)
+            else:
+                self._absorb(twin, item)
+                del store[key]
+
+    def _enrich_titles(self, titles: List[Title]) -> None:
+        """
+        Make every top result carry BOTH databases' data (name + poster).
+
+        * IMDb hit  -> TMDB /find/<tt id>      gives the TMDB spelling + TMDB poster
+        * TMDB hit  -> IMDb suggestion by id   gives the IMDb spelling + IMDb poster
+        """
+        def work(item: Title) -> Title:
+            try:
+                if item.imdb_id.startswith("tt"):
+                    if self.tmdb_api_key and not item.tmdb_title:
+                        find = self._tmdb_find(item.imdb_id)
+                        ref = self._pick_tmdb_ref(find)
+                        if ref and ref[0] in ("movie", "tv") and find:
+                            rows = find.get("movie_results" if ref[0] == "movie" else "tv_results") or []
+                            row = rows[0] if rows else {}
+                            name = self._clean_text(row.get("title") or row.get("name"))
+                            original = self._clean_text(
+                                row.get("original_title") or row.get("original_name")
+                            )
+                            poster = self._tmdb_img(row.get("poster_path"), "w500")
+                            if name:
+                                item.tmdb_title = name
+                            if original and not item.original_title:
+                                item.original_title = original
+                            if poster and not item.tmdb_poster_url:
+                                item.tmdb_poster_url = poster
+                            item.tmdb_id = item.tmdb_id or self._safe_int(row.get("id"))
+                            if not item.backdrop_url:
+                                item.backdrop_url = self._tmdb_img(
+                                    row.get("backdrop_path"), self.BACKDROP_SIZE
+                                )
+                            if not item.overview:
+                                item.overview = self._clean_text(row.get("overview"))
+                            if not item.image_url and poster:
+                                item.image_url = poster
+                            if "tmdb" not in item.sources:
+                                item.sources.append("tmdb")
+                    if not item.imdb_title:
+                        found = self._find_imdb_title(item.imdb_id)
+                        if found:
+                            item.imdb_title = found.title
+                            item.imdb_poster_url = item.imdb_poster_url or found.image_url
+                            item.image_url = item.image_url or found.image_url
+                            item.cast_text = item.cast_text or found.cast_text
+                            if "imdb" not in item.sources:
+                                item.sources.append("imdb")
+                item.alt_titles = unique_names(
+                    list(item.alt_titles or [])
+                    + [item.imdb_title, item.tmdb_title, item.original_title]
+                )
+            except Exception as exc:
+                logger.warning("IMDBKit enrich failed for %s: %s", item.imdb_id, exc)
+            return item
+
+        self._pmap(work, titles, 4)
 
     # ============================================================
     # Search
@@ -1173,7 +1361,9 @@ class IMDBKit:
         tmdb_future = None
         if self.tmdb_api_key:
             tmdb_pool = ThreadPoolExecutor(max_workers=1)
-            tmdb_future = tmdb_pool.submit(self._tmdb_search_titles, parsed, primary[:2])
+            main_norm = normalize_text(parsed["title"]) or normalize_text(parsed["title_loose"])
+            tmdb_queries = self._dedupe(primary[:2] + double_letter_variants(main_norm, 2))
+            tmdb_future = tmdb_pool.submit(self._tmdb_search_titles, parsed, tmdb_queries)
 
         try:
             # ---- wave 1: user text + Roman-Hindi respellings, in parallel ----
@@ -1187,7 +1377,7 @@ class IMDBKit:
                 corrections = self._correction_queries(parsed)
                 main = normalize_text(parsed["title"]) or normalize_text(parsed["title_loose"])
                 retrieval = self._dedupe(
-                    corrections + prefix_variants(main) + word_variants(main)
+                    corrections + double_letter_variants(main) + prefix_variants(main) + word_variants(main)
                 )
                 retrieval = [q for q in retrieval if q not in primary][:10]
                 if retrieval:
@@ -1217,6 +1407,21 @@ class IMDBKit:
                 ranked = self._rank(
                     parsed, candidates.values(), kind_filter, include_upcoming, corrections
                 )
+
+            # ---- both databases for every candidate ----------------------------------
+            # IMDb and TMDB often spell the same film differently ("Nayi Naveli" /
+            # "Nayyi Navelli"). Give each top candidate the other database's name and
+            # poster, then rank again so the film is found under either spelling.
+            self._collapse_duplicates(candidates)
+            top = self._rank(
+                parsed, candidates.values(), kind_filter, include_upcoming,
+                corrections, relaxed=True,
+            )
+            self._enrich_titles([row[2] for row in top[:6]])
+            self._collapse_duplicates(candidates)
+            ranked = self._rank(
+                parsed, candidates.values(), kind_filter, include_upcoming, corrections
+            )
         finally:
             if tmdb_pool:
                 tmdb_pool.shutdown(wait=False)
@@ -1340,6 +1545,15 @@ class IMDBKit:
                         "Accept-Language": "en-US,en;q=0.9",
                     },
                 )
+                original_title = None
+                om = re.search(
+                    r'"originalTitleText"\s*:\s*\{\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"', body or ""
+                )
+                if om:
+                    try:
+                        original_title = json.loads(f'"{om.group(1)}"')
+                    except ValueError:
+                        original_title = om.group(1)
                 match = re.search(
                     r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
                     body or "",
@@ -1368,7 +1582,12 @@ class IMDBKit:
                             "directors": self._ld_people(ld.get("director")),
                             "writers": self._ld_people(ld.get("creator")),
                             "stars": self._ld_people(ld.get("actor")),
+                            "original_title": html_lib.unescape(
+                                original_title or ld.get("alternateName") or ""
+                            ) or None,
                         }
+                elif original_title:
+                    data = {"original_title": html_lib.unescape(original_title)}
             except Exception as exc:
                 logger.warning("IMDBKit IMDb page parse failed for %s: %s", imdb_id, exc)
                 data = {}
@@ -1564,7 +1783,11 @@ class IMDBKit:
         )
         tmdb_title = data.get("title") or data.get("name")
         localized_title = tmdb_title if tmdb_title and tmdb_title != title else None
-        original_title = data.get("original_title") or data.get("original_name")
+        # TMDB original title first, else the one IMDb shows ("Original title: ...")
+        original_title = (
+            data.get("original_title") or data.get("original_name") or page.get("original_title")
+        )
+        imdb_name = (imdb_title.title if imdb_title else None) or page.get("title")
 
         # ---------- dates ----------
         release_date = data.get("release_date") or data.get("first_air_date") or page.get("date")
@@ -1697,7 +1920,6 @@ class IMDBKit:
             for row in (alt.get("titles") or alt.get("results") or [])
             if isinstance(row, dict)
         )
-
         certificates = self._tmdb_certificates(data, media_type)
         if not certificates and page.get("certificate"):
             certificates = [str(page["certificate"])]
@@ -1776,6 +1998,9 @@ class IMDBKit:
             logo_url=pics["logo"],
             trailer_url=self._pick_trailer(data),
             imdb_poster_url=imdb_image,
+            tmdb_poster_url=pics["poster"],
+            imdb_title=imdb_name,
+            tmdb_title=tmdb_title,
             tmdb_id=self._safe_int(data.get("id")),
             media_type=media_type,
             original_language=data.get("original_language"),
