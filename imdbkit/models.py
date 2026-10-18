@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Dict, List, Optional
@@ -36,6 +37,29 @@ def format_runtime(minutes: Any) -> Optional[str]:
     if hours:
         return f"{hours}h"
     return f"{mins}m"
+
+
+def _name_key(value: Any) -> str:
+    """Case / punctuation / space insensitive key used to tell whether two names differ.
+
+    "Nayyi NAVELLI" and "Nayyi Navelli" are the same name; "Nayi Naveli" is a different
+    *spelling* and must be kept as a second name.
+    """
+    text = unicodedata.normalize("NFKD", str(value or "")).lower()
+    return re.sub(r"[^0-9a-z\u0900-\u097f]+", "", text)
+
+
+def unique_names(values: Any) -> List[str]:
+    """Keep the first spelling of every distinct name (order preserved)."""
+    out: List[str] = []
+    seen = set()
+    for value in values:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        key = _name_key(text)
+        if text and key and key not in seen:
+            seen.add(key)
+            out.append(text)
+    return out
 
 
 @dataclass
@@ -99,6 +123,16 @@ class Title:
     overview: Optional[str] = None
     score: float = 0.0                      # relevance score of the last search
     platform: Optional[str] = None          # e.g. "Netflix" (when known)
+
+    # --- both databases, side by side (IMDb and TMDB often spell a title differently,
+    #     e.g. IMDb "Nayi Naveli" / original "Nayyi Navelli", TMDB "Nayyi NAVELLI") ---
+    imdb_title: Optional[str] = None        # name as IMDb shows it
+    tmdb_title: Optional[str] = None        # name as TMDB shows it
+    original_title: Optional[str] = None    # original title (IMDb "Original title" / TMDB)
+    alt_titles: List[str] = field(default_factory=list)   # any other spelling seen
+    imdb_poster_url: Optional[str] = None   # poster from IMDb
+    tmdb_poster_url: Optional[str] = None   # poster from TMDB
+    sources: List[str] = field(default_factory=list)      # ["imdb"], ["tmdb"] or both
     # How well the title matches what the user typed (set by search):
     #   "exact"    same title (ignoring case / punctuation / leading The-A-An)
     #   "phonetic" same pronunciation (pathan / pathaan, mirjapur / mirzapur)
@@ -106,6 +140,10 @@ class Title:
     #   "partial"  shares words / is a prefix / franchise sibling
     #   "weak"     best-effort suggestion only
     match_type: str = ""
+    # 0-100 spelling similarity between what the user typed and the closest of this
+    # title's names (any database). 100 = same, 0 = sequel number differs ("tiger 3" vs
+    # "tiger 2"). Lets the CALLER pick its own auto-correct threshold (e.g. >= 80).
+    similarity: float = 0.0
     # Only when the query had a year: "exact" | "within" (running series) | "near" (+-1) | "off"
     year_match: Optional[str] = None
 
@@ -143,9 +181,27 @@ class Title:
         return str(self.year)
 
     @property
+    def names(self) -> List[str]:
+        """Every distinct spelling of this title (IMDb, TMDB, original, others).
+
+        Use it to search your own database / to match file names:
+        ["Nayi Naveli", "Nayyi Navelli"].
+        """
+        return unique_names(
+            [self.title, self.imdb_title, self.tmdb_title, self.original_title]
+            + list(self.alt_titles or [])
+        )
+
+    @property
+    def display_title(self) -> str:
+        """'Nayi Naveli / Nayyi Navelli' when the databases disagree, else just the title."""
+        names = self.names[:2]
+        return " / ".join(names) if names else (self.title or "")
+
+    @property
     def label(self) -> str:
         """Ready to show in buttons: 'Interstellar (2014) • Movie'."""
-        text = self.title
+        text = self.display_title
         if self.year_text:
             text += f" ({self.year_text})"
         if self.kind:
@@ -177,6 +233,14 @@ class Title:
             "status": self.status,
             "label": self.label,
             "platform": self.platform,
+            "imdb_title": self.imdb_title,
+            "tmdb_title": self.tmdb_title,
+            "original_title": self.original_title,
+            "names": self.names,
+            "display_title": self.display_title,
+            "imdb_poster_url": self.imdb_poster_url,
+            "tmdb_poster_url": self.tmdb_poster_url,
+            "sources": list(self.sources),
         }
 
         return mapping.get(key, default)
@@ -220,7 +284,16 @@ class Title:
             "label": self.label,
             "tmdb_id": self.tmdb_id,
             "platform": self.platform,
+            "imdb_title": self.imdb_title,
+            "tmdb_title": self.tmdb_title,
+            "original_title": self.original_title,
+            "names": self.names,
+            "display_title": self.display_title,
+            "imdb_poster_url": self.imdb_poster_url,
+            "tmdb_poster_url": self.tmdb_poster_url,
+            "sources": list(self.sources),
             "match_type": self.match_type,
+            "similarity": self.similarity,
             "year_match": self.year_match,
         }
 
@@ -458,6 +531,9 @@ class Movie:
     logo_url: Optional[str] = None
     trailer_url: Optional[str] = None
     imdb_poster_url: Optional[str] = None   # the poster IMDb itself uses
+    tmdb_poster_url: Optional[str] = None   # the poster TMDB uses
+    imdb_title: Optional[str] = None        # name as IMDb shows it
+    tmdb_title: Optional[str] = None        # name as TMDB shows it
 
     tmdb_id: Optional[int] = None
     media_type: Optional[str] = None        # "movie" | "tv"
@@ -579,6 +655,18 @@ class Movie:
     @property
     def poster_url(self) -> Optional[str]:
         return self.cover_url
+
+    @property
+    def names(self) -> List[str]:
+        """Every distinct spelling: IMDb title, TMDB title, original title, localized."""
+        return unique_names(
+            [self.title, self.imdb_title, self.tmdb_title, self.original_title, self.title_localized]
+        )
+
+    @property
+    def display_title(self) -> str:
+        names = self.names[:2]
+        return " / ".join(names) if names else (self.title or "")
 
     @property
     def is_series(self) -> bool:
