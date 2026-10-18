@@ -456,6 +456,57 @@ def word_variants(norm: str) -> List[str]:
     return result
 
 
+def double_letter_variants(norm: str, limit: int = 4) -> List[str]:
+    """
+    Single <-> double letter respellings.  IMDb and TMDB often disagree on exactly this:
+    "nayi naveli" (IMDb)  vs  "nayyi navelli" (TMDB).
+
+    * collapsed : every doubled letter becomes single   (nayyi navelli -> nayi naveli)
+    * sonorants : y l n r m between two vowels are doubled in every word
+    * one-by-one: a single letter doubled, one position at a time
+    """
+    norm = (norm or "").strip()
+    if not norm:
+        return []
+    out: List[str] = []
+
+    def add(value: str):
+        value = re.sub(r"\s+", " ", value).strip()
+        if value and value != norm and value not in out:
+            out.append(value)
+
+    add(re.sub(r"([a-z])\1+", r"\1", norm))
+
+    vowels = "aeiou"
+
+    def double_in_word(word: str, only: str, at: Optional[int] = None) -> str:
+        chars = list(word)
+        res = []
+        for i, ch in enumerate(chars):
+            res.append(ch)
+            if (
+                0 < i < len(chars) - 1
+                and ch in only
+                and chars[i - 1] in vowels
+                and chars[i + 1] in vowels
+                and (at is None or at == i)
+            ):
+                res.append(ch)
+        return "".join(res)
+
+    words = norm.split()
+    add(" ".join(double_in_word(w, "ylnrm") for w in words))
+
+    for wi, word in enumerate(words):
+        for i, ch in enumerate(word):
+            if len(out) >= limit + 2:
+                break
+            variant = double_in_word(word, "ylnrmtkpbdgsvj", at=i)
+            if variant != word:
+                add(" ".join(words[:wi] + [variant] + words[wi + 1:]))
+    return out[:limit]
+
+
 def build_primary_queries(parsed: Dict[str, Any], limit: int = 6) -> List[str]:
     """First-wave search strings for a parsed query."""
     queries: List[str] = []
